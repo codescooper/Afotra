@@ -1,0 +1,12 @@
+﻿{
+    "Date":  "2026-03-30",
+    "TotalSamples":  168,
+    "SampleIntervalSeconds":  10,
+    "TotalTrackedMinutes":  28,
+    "ContextSwitches":  23,
+    "FocusMinutes":  2,
+    "DistractionMinutes":  20.5,
+    "GoalFocusMinutes":  180,
+    "GoalMaxDistractionMin":  60,
+    "FocusScore":  60
+}
