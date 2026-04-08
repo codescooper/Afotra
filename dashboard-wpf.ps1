@@ -201,10 +201,10 @@ $xaml = @"
                         </StackPanel>
                     </Border>
                     
-                    <Border Style="{StaticResource CardStyle}">
+                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
                         <StackPanel Margin="20">
                             <TextBlock Text="Last 10 Activities" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
-                            <DataGrid x:Name="RecentActivitiesGrid" Height="280" AutoGenerateColumns="False" IsReadOnly="True" Background="White" RowDetailsVisibilityMode="VisibleWhenSelected">
+                            <DataGrid x:Name="RecentActivitiesGrid" Height="280" AutoGenerateColumns="False" IsReadOnly="True" Background="White">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="70"/>
                                     <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="100"/>
@@ -218,11 +218,11 @@ $xaml = @"
 
                 <!-- Unknown Activities View -->
                 <StackPanel x:Name="UnknownActivitiesView" Visibility="Collapsed">
-                    <TextBlock Text="Unknown Activities" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
+                    <TextBlock Text="Unknown Activities" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
                     
-                    <Border Style="{StaticResource CardStyle}">
+                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Categorize unclassified activities to improve tracking" FontSize="14" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,15"/>
+                            <TextBlock Text="Categorize unclassified activities to improve tracking" FontSize="14" Foreground="#6B7280" Margin="0,0,0,15"/>
                             <DataGrid x:Name="UnknownActivitiesGrid" Height="350" AutoGenerateColumns="False" IsReadOnly="True" Background="White" CanUserAddRows="False">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Process" Binding="{Binding ProcessName}" Width="150"/>
@@ -232,8 +232,8 @@ $xaml = @"
                                 </DataGrid.Columns>
                             </DataGrid>
                             <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
-                                <Button x:Name="BtnCategorizeUnknown" Content="Categorize Selected" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" Background="{StaticResource SuccessBrush}"/>
-                                <Button x:Name="BtnRefreshUnknown" Content="Refresh" Style="{StaticResource PrimaryButtonStyle}" Background="{StaticResource SecondaryBrush}"/>
+                                <Button x:Name="BtnCategorizeUnknown" Content="Categorize Selected" Background="#10B981" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,10,0"/>
+                                <Button x:Name="BtnRefreshUnknown" Content="Refresh" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -241,27 +241,27 @@ $xaml = @"
 
                 <!-- Rules & Categories View -->
                 <StackPanel x:Name="RulesCategoriesView" Visibility="Collapsed">
-                    <TextBlock Text="Rules &amp; Categories" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
+                    <TextBlock Text="Rules &amp; Categories" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
                     
                     <Grid Margin="0,0,0,20">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/>
                         </Grid.ColumnDefinitions>
                         
-                        <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,10,0">
+                        <Border Grid.Column="0" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
                             <StackPanel Margin="20">
-                                <TextBlock Text="Categories" FontSize="16" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
+                                <TextBlock Text="Categories" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
                                 <ListBox x:Name="CategoriesListBox" Height="150" Background="White" FontSize="13"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
                                     <TextBox x:Name="NewCategoryTextBox" Width="240" Padding="8" Margin="0,0,10,0" Background="White"/>
-                                    <Button x:Name="BtnAddCategory" Content="Add" Style="{StaticResource PrimaryButtonStyle}" Width="90"/>
+                                    <Button x:Name="BtnAddCategory" Content="Add" Background="#2563EB" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Width="90"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
                         
-                        <Border Grid.Column="1" Style="{StaticResource CardStyle}">
+                        <Border Grid.Column="1" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
                             <StackPanel Margin="20">
-                                <TextBlock Text="Process Rules" FontSize="16" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
+                                <TextBlock Text="Process Rules" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
                                 <DataGrid x:Name="ProcessRulesGrid" Height="150" AutoGenerateColumns="False" Background="White" CanUserAddRows="False">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*"/>
@@ -269,8 +269,8 @@ $xaml = @"
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                    <Button x:Name="BtnAddProcessRule" Content="Add Rule" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" Width="120"/>
-                                    <Button x:Name="BtnDeleteProcessRule" Content="Delete" Style="{StaticResource PrimaryButtonStyle}" Background="{StaticResource DangerBrush}" Width="100"/>
+                                    <Button x:Name="BtnAddProcessRule" Content="Add Rule" Background="#2563EB" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,10,0" Width="120"/>
+                                    <Button x:Name="BtnDeleteProcessRule" Content="Delete" Background="#EF4444" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Width="100"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
