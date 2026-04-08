@@ -8,6 +8,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# This dashboard requires Windows + Desktop .NET (WPF)
+if (-not $IsWindows) {
+    throw "AFOTRA dashboard-wpf.ps1 requires Windows (WPF is not available on this OS)."
+}
+
 # Add WPF assemblies
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -69,6 +74,8 @@ $global:CurrentActivityInfo = $null
 $global:CurrentLogFile = $null
 $global:DashboardUpdateTimer = $null
 $global:LastActivityGroup = $null
+$global:TrackerTimerEventSub = $null
+$global:DashboardTimerEventSub = $null
 
 # XAML for the main window
 $xaml = @"
@@ -100,6 +107,7 @@ $xaml = @"
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Cursor" Value="Hand"/>
         </Style>
+    </Window.Resources>
     <Grid>
         <!-- Sidebar Navigation -->
         <Border Background="#2563EB" Width="260" HorizontalAlignment="Left">
@@ -283,8 +291,17 @@ $xaml = @"
 "@
 
 # Load XAML
-$reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-$window = [Windows.Markup.XamlReader]::Load($reader)
+try {
+    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+}
+catch {
+    $base = "XAML parse error while loading dashboard UI."
+    if ($_.Exception -and $_.Exception.InnerException) {
+        throw "$base $($_.Exception.InnerException.Message)"
+    }
+    throw "$base $($_.Exception.Message)"
+}
 
 # Get UI elements
 $navDashboard = $window.FindName("NavDashboard")
@@ -341,6 +358,19 @@ function Show-View {
     $global:CurrentView = $viewName
 }
 
+function Invoke-OnUIThread {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    if ($window.Dispatcher.CheckAccess()) {
+        & $Action
+    } else {
+        $window.Dispatcher.Invoke($Action)
+    }
+}
+
 $navDashboard.Add_Click({ Show-View "DashboardView" })
 $navLiveTracking.Add_Click({ Show-View "LiveTrackingView" })
 $navUnknownActivities.Add_Click({ Show-View "UnknownActivitiesView" })
@@ -392,12 +422,20 @@ function Update-Dashboard {
         Update-ActivityChart -Categories $categories -TotalSeconds $totalSeconds
         
         if ($global:CurrentView -eq "LiveTrackingView") {
-            $liveProcessText.Text = $global:CurrentActivityInfo.ProcessName
-            $liveWindowText.Text = $global:CurrentActivityInfo.WindowTitle
-            $liveCategoryText.Text = $global:CurrentActivityInfo.Category
+            if ($global:CurrentActivityInfo) {
+                $liveProcessText.Text = $global:CurrentActivityInfo.ProcessName
+                $liveWindowText.Text = $global:CurrentActivityInfo.WindowTitle
+                $liveCategoryText.Text = $global:CurrentActivityInfo.Category
+            } else {
+                $liveProcessText.Text = "--"
+                $liveWindowText.Text = "--"
+                $liveCategoryText.Text = "--"
+            }
             if ($global:CurrentActivityStart) {
                 $elapsed = (Get-Date) - $global:CurrentActivityStart
                 $liveCurrentTimeText.Text = $elapsed.ToString('hh\:mm\:ss')
+            } else {
+                $liveCurrentTimeText.Text = "00:00:00"
             }
             $recentActivities = @($data | Select-Object -Last 10 | ForEach-Object {
                 [PSCustomObject]@{
@@ -406,7 +444,11 @@ function Update-Dashboard {
             })
             $recentActivitiesGrid.ItemsSource = @($recentActivities | Sort-Object Time -Descending)
         }
-    } catch { }
+    } catch {
+        if ($Debug) {
+            Write-Warning "Update-Dashboard failed: $_"
+        }
+    }
 }
 
 function Update-ActivityChart {
@@ -461,7 +503,11 @@ function Update-UnknownActivities {
             }
         }
         $unknownActivitiesGrid.ItemsSource = @($unknownActivities)
-    } catch { }
+    } catch {
+        if ($Debug) {
+            Write-Warning "Update-UnknownActivities failed: $_"
+        }
+    }
 }
 
 function Update-Rules-UI {
@@ -472,7 +518,35 @@ function Update-Rules-UI {
             $rulesData += [PSCustomObject]@{ Process = $rule.process; Category = $rule.category }
         }
         $processRulesGrid.ItemsSource = @($rulesData)
-    } catch { }
+    } catch {
+        if ($Debug) {
+            Write-Warning "Update-Rules-UI failed: $_"
+        }
+    }
+}
+
+function Stop-TrackingTimer {
+    if ($global:TrackerTimer) {
+        $global:TrackerTimer.Stop()
+        $global:TrackerTimer.Dispose()
+        $global:TrackerTimer = $null
+    }
+    if ($global:TrackerTimerEventSub) {
+        Unregister-Event -SubscriptionId $global:TrackerTimerEventSub.Id -ErrorAction SilentlyContinue
+        $global:TrackerTimerEventSub = $null
+    }
+}
+
+function Stop-DashboardTimer {
+    if ($global:DashboardUpdateTimer) {
+        $global:DashboardUpdateTimer.Stop()
+        $global:DashboardUpdateTimer.Dispose()
+        $global:DashboardUpdateTimer = $null
+    }
+    if ($global:DashboardTimerEventSub) {
+        Unregister-Event -SubscriptionId $global:DashboardTimerEventSub.Id -ErrorAction SilentlyContinue
+        $global:DashboardTimerEventSub = $null
+    }
 }
 
 # Tracking button
@@ -507,7 +581,7 @@ $btnStartStop.Add_Click({
             } catch { }
         }
         
-        Register-ObjectEvent -InputObject $global:TrackerTimer -EventName Elapsed -Action $action -ErrorAction SilentlyContinue | Out-Null
+        $global:TrackerTimerEventSub = Register-ObjectEvent -InputObject $global:TrackerTimer -EventName Elapsed -Action $action -ErrorAction SilentlyContinue
         $global:TrackerTimer.Start()
         
         $btnStartStop.Content = "⏹ Stop Tracking"
@@ -516,7 +590,7 @@ $btnStartStop.Add_Click({
         
     } else {
         $global:TrackerRunning = $false
-        if ($global:TrackerTimer) { $global:TrackerTimer.Stop(); $global:TrackerTimer.Dispose(); $global:TrackerTimer = $null }
+        Stop-TrackingTimer
         $statusText.Text = "Status: Stopped ⏸️"
         $btnStartStop.Content = "Start Tracking"
         $btnStartStop.Background = "#10B981"
@@ -621,20 +695,24 @@ $btnOpenLogs.Add_Click({
 $global:DashboardUpdateTimer = New-Object System.Timers.Timer
 $global:DashboardUpdateTimer.Interval = 1500
 $global:DashboardUpdateTimer.AutoReset = $true
-$dashboardAction = { if ($global:TrackerRunning) { Update-Dashboard } }
-Register-ObjectEvent -InputObject $global:DashboardUpdateTimer -EventName Elapsed -Action $dashboardAction -ErrorAction SilentlyContinue | Out-Null
+$dashboardAction = {
+    if ($global:TrackerRunning) {
+        Invoke-OnUIThread { Update-Dashboard }
+    }
+}
+$global:DashboardTimerEventSub = Register-ObjectEvent -InputObject $global:DashboardUpdateTimer -EventName Elapsed -Action $dashboardAction -ErrorAction SilentlyContinue
 $global:DashboardUpdateTimer.Start()
 
 # Window cleanup
 $window.Add_Closing({
     try {
-        if ($global:TrackerTimer) { $global:TrackerTimer.Stop(); $global:TrackerTimer.Dispose() }
-        if ($global:DashboardUpdateTimer) { $global:DashboardUpdateTimer.Stop(); $global:DashboardUpdateTimer.Dispose() }
+        Stop-TrackingTimer
+        Stop-DashboardTimer
     } catch { }
 })
 
 Initialize-UI
 $window.ShowDialog() | Out-Null
 
-if ($global:TrackerTimer) { $global:TrackerTimer.Stop(); $global:TrackerTimer.Dispose() }
-if ($global:DashboardUpdateTimer) { $global:DashboardUpdateTimer.Stop(); $global:DashboardUpdateTimer.Dispose() }
+Stop-TrackingTimer
+Stop-DashboardTimer
