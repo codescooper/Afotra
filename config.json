@@ -1,52 +1,8 @@
 {
   "sampleIntervalSeconds": 10,
-  "logRoot": "C:\\AFOTRA - Awema Focus Tracker\\logs",
-  "categories": {
-    "travail": [
-      "Code",
-      "devenv",
-      "WINWORD",
-      "EXCEL",
-      "POWERPNT",
-      "notepad++",
-      "notepad",
-      "Obsidian",
-      "Notion",
-      "Acrobat",
-      "SumatraPDF",
-      "WindowsTerminal",
-      "powershell",
-      "pwsh",
-      "cmd"
-    ],
-    "communication": [
-      "OUTLOOK",
-      "Teams",
-      "Slack",
-      "Discord",
-      "Telegram"
-    ],
-    "distraction": [
-      "Spotify",
-      "Steam"
-    ]
-  },
-  "titleRules": [
-    { "contains": "YouTube", "category": "distraction" },
-    { "contains": "Netflix", "category": "distraction" },
-    { "contains": "Twitch", "category": "distraction" },
-    { "contains": "Instagram", "category": "distraction" },
-    { "contains": "TikTok", "category": "distraction" },
-    { "contains": "Facebook", "category": "distraction" },
-    { "contains": "X", "category": "distraction" },
-    { "contains": "Gmail", "category": "communication" },
-    { "contains": "Google Docs", "category": "travail" },
-    { "contains": "Stack Overflow", "category": "travail" },
-    { "contains": "Documentation", "category": "travail" },
-    { "contains": "ChatGPT", "category": "travail" }
-  ],
-  "goals": {
-    "focusMinPerDay": 180,
-    "maxDistractionMinPerDay": 60
-  }
+  "focusMinPerDay": 480,
+  "maxDistractionMinPerDay": 120,
+  "logFolder": "logs",
+  "userName": "",
+  "machineName": ""
 }

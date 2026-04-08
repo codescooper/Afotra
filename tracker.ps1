@@ -1,124 +1,99 @@
-param(
-    [string]$ConfigPath = "C:\AFOTRA - Awema Focus Tracker\config.json"
+# tracker.ps1 - Standalone tracker script
+# Author: CodeScooper
+# Project: AFOTRA - Awema Focus Tracker
+
+param (
+    [switch]$Stop,
+    [switch]$Check
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if (-not (Test-Path $ConfigPath)) {
-    throw "Config introuvable : $ConfigPath"
-}
+try {
+    $scriptRoot = $PSScriptRoot
+    $configPath = Join-Path $scriptRoot "config.json"
+    $rulesPath = Join-Path $scriptRoot "rules.json"
 
-$config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+    # Import modules
+    Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
+    Import-Module (Join-Path $scriptRoot "modules\Rules.Core.psm1") -Force
 
-$sampleInterval = [int]$config.sampleIntervalSeconds
-$logRoot = $config.logRoot
+    $config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
+    $rules = Load-Rules -RulesPath $rulesPath
+    $logFolder = Join-Path $scriptRoot $config.logFolder
 
-if (-not (Test-Path $logRoot)) {
-    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
-}
-
-$today = Get-Date -Format "yyyy-MM-dd"
-$logPath = Join-Path $logRoot "activity-$today.csv"
-
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class Win32Focus
-{
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-}
-"@
-
-function Get-Category {
-    param(
-        [string]$ProcessName,
-        [string]$WindowTitle,
-        $Config
-    )
-
-    foreach ($rule in $Config.titleRules) {
-        if ($WindowTitle -like "*$($rule.contains)*") {
-            return $rule.category
-        }
-    }
-
-    foreach ($catProp in $Config.categories.PSObject.Properties) {
-        $catName = $catProp.Name
-        foreach ($app in $catProp.Value) {
-            if ($ProcessName -ieq $app) {
-                return $catName
-            }
-        }
-    }
-
-    return "inconnu"
-}
-
-function Get-ActiveWindowSnapshot {
-    param($Config)
-
-    $hWnd = [Win32Focus]::GetForegroundWindow()
-    if ($hWnd -eq [IntPtr]::Zero) {
-        return $null
-    }
-
-    $buffer = New-Object System.Text.StringBuilder 1024
-    [void][Win32Focus]::GetWindowText($hWnd, $buffer, $buffer.Capacity)
-
-    $processId = 0
-    [void][Win32Focus]::GetWindowThreadProcessId($hWnd, [ref]$processId)
-
-    if ($processId -eq 0) {
-        return $null
-    }
-
-    try {
-        $proc = Get-Process -Id $processId -ErrorAction Stop
-    }
-    catch {
-        return $null
-    }
-
-    $title = $buffer.ToString().Trim()
-    $processName = $proc.ProcessName
-    $category = Get-Category -ProcessName $processName -WindowTitle $title -Config $Config
-
-    [PSCustomObject]@{
-        Timestamp      = (Get-Date).ToString("s")
-        Date           = (Get-Date).ToString("yyyy-MM-dd")
-        Time           = (Get-Date).ToString("HH:mm:ss")
-        ProcessName    = $processName
-        ProcessId      = $processId
-        WindowTitle    = $title
-        Category       = $category
-        SampleSeconds  = $sampleInterval
-        UserName       = $env:USERNAME
-        MachineName    = $env:COMPUTERNAME
-    }
-}
-
-Write-Host "Tracking lancé. Log : $logPath"
-Write-Host "Arrêt : Ctrl+C"
-
-while ($true) {
-    $snapshot = Get-ActiveWindowSnapshot -Config $config
-    if ($null -ne $snapshot) {
-        if (-not (Test-Path $logPath)) {
-            $snapshot | Export-Csv -Path $logPath -NoTypeInformation
+    if ($Check) {
+        $psProcesses = Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*AFOTRA*" }
+        if ($psProcesses.Count -gt 0) {
+            Write-Host "[OK] Tracker is running" -ForegroundColor Green
+            exit 0
         }
         else {
-            $snapshot | Export-Csv -Path $logPath -NoTypeInformation -Append
+            Write-Host "[NOT RUNNING] Tracker is not running" -ForegroundColor Red
+            exit 1
         }
     }
-    Start-Sleep -Seconds $sampleInterval
+
+    if ($Stop) {
+        Write-Host "Stopping tracker..." -ForegroundColor Yellow
+        $psProcesses = Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*AFOTRA*" }
+        if ($psProcesses.Count -gt 0) {
+            $psProcesses | Stop-Process -Force
+            Write-Host "Tracker stopped" -ForegroundColor Green
+        }
+        else {
+            Write-Host "No tracker process found" -ForegroundColor Yellow
+        }
+        exit 0
+    }
+
+    # Check if already running
+    $psProcesses = Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*AFOTRA Tracker*" }
+    if ($psProcesses.Count -gt 0) {
+        Write-Host "Tracker is already running!" -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Host "AFOTRA - Awema Focus Tracker" -ForegroundColor Green
+    Write-Host "Starting tracker with interval: $($config.sampleIntervalSeconds)s" -ForegroundColor Green
+
+    $logFile = Get-TodayLogFile -LogFolder $logFolder
+    Initialize-LogFile -LogFile $logFile
+    Write-Host "Logging to: $logFile" -ForegroundColor Green
+
+    $timer = New-Object System.Timers.Timer
+    $timer.Interval = $config.sampleIntervalSeconds * 1000
+    $timer.AutoReset = $true
+
+    $action = {
+        $info = Get-ActiveWindowInfo
+        if ($info) {
+            $category = Classify-Activity -ProcessName $info.ProcessName -WindowTitle $info.WindowTitle -Rules $rules
+            $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
+            Write-ActivityLog -LogFile $logFile -ActivityInfo $info -SampleSeconds $config.sampleIntervalSeconds
+            Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] $($info.ProcessName) > $category" -ForegroundColor Cyan
+        }
+    }
+
+    Register-ObjectEvent -InputObject $timer -EventName Elapsed -Action $action | Out-Null
+    $timer.Start()
+
+    $host.UI.RawUI.WindowTitle = "AFOTRA Tracker - Running"
+
+    Write-Host "Tracker running. Press Ctrl+C to stop." -ForegroundColor Yellow
+
+    try {
+        while ($true) {
+            Start-Sleep 1
+        }
+    }
+    finally {
+        $timer.Stop()
+        $timer.Dispose()
+        Write-Host "Tracker stopped" -ForegroundColor Green
+    }
+}
+catch {
+    Write-Error "Error: $_"
+    exit 1
 }

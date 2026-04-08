@@ -1,0 +1,124 @@
+# Report.Core.psm1 - Core functions for generating reports
+# Author: CodeScooper
+# Project: AFOTRA - Awema Focus Tracker
+
+function Get-ReportData {
+    param (
+        [string]$LogFile
+    )
+    
+    if (!(Test-Path $LogFile)) {
+        return $null
+    }
+
+    try {
+        $data = @(Import-Csv -Path $LogFile -Encoding UTF8)
+        if ($data.Count -eq 0) { return $null }
+
+        $sampleSeconds = [int]$data[0].SampleSeconds
+        $totalSeconds = $data.Count * $sampleSeconds
+
+        $categories = @{}
+        $processes = @{}
+        $unknowns = @{}
+
+        foreach ($row in $data) {
+            # Categories
+            if (!$categories[$row.Category]) {
+                $categories[$row.Category] = 0
+            }
+            $categories[$row.Category] += $sampleSeconds
+
+            # Processes
+            if (!$processes[$row.ProcessName]) {
+                $processes[$row.ProcessName] = 0
+            }
+            $processes[$row.ProcessName] += $sampleSeconds
+
+            # Unknowns
+            if ($row.Category -eq "inconnu") {
+                $key = "$($row.ProcessName)|$($row.WindowTitle)"
+                if (!$unknowns[$key]) {
+                    $unknowns[$key] = @{
+                        ProcessName = $row.ProcessName
+                        WindowTitle = $row.WindowTitle
+                        Count = 0
+                        Seconds = 0
+                    }
+                }
+                $unknowns[$key].Count++
+                $unknowns[$key].Seconds += $sampleSeconds
+            }
+        }
+
+        $focusSeconds = if ($categories["travail"]) { $categories["travail"] } else { 0 }
+        $focusScore = if ($totalSeconds -gt 0) { [math]::Round(($focusSeconds / $totalSeconds) * 100, 2) } else { 0 }
+
+        $contextSwitches = ($data | Group-Object WindowTitle).Count
+
+        return @{
+            TotalSeconds = $totalSeconds
+            SampleSeconds = $sampleSeconds
+            Categories = $categories
+            Processes = $processes
+            Unknowns = $unknowns
+            FocusScore = $focusScore
+            ContextSwitches = $contextSwitches
+            DataRows = $data
+        }
+    }
+    catch {
+        Write-Warning "Error processing report data: $_"
+        return $null
+    }
+}
+
+function Export-ReportToJSON {
+    param (
+        [object]$ReportData,
+        [string]$OutputFile
+    )
+    
+    $folder = Split-Path -Parent $OutputFile
+    if (!(Test-Path $folder)) {
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    }
+
+    $focusSeconds = if ($ReportData.Categories["travail"]) { $ReportData.Categories["travail"] } else { 0 }
+    $distractionSeconds = if ($ReportData.Categories["distraction"]) { $ReportData.Categories["distraction"] } else { 0 }
+
+    $topProcesses = @{}
+    $ReportData.Processes.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5 | ForEach-Object {
+        $topProcesses[$_.Key] = $_.Value
+    }
+    
+    $summary = @{
+        TotalTrackedMinutes = [math]::Round($ReportData.TotalSeconds / 60, 2)
+        FocusMinutes = [math]::Round($focusSeconds / 60, 2)
+        DistractionMinutes = [math]::Round($distractionSeconds / 60, 2)
+        FocusScore = $ReportData.FocusScore
+        ContextSwitches = $ReportData.ContextSwitches
+        Categories = $ReportData.Categories
+        TopProcesses = $topProcesses
+    }
+
+    $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $OutputFile -Encoding UTF8 -Force
+}
+
+function Get-UnknownActivities {
+    param (
+        [string]$LogFile
+    )
+    if (!(Test-Path $LogFile)) { return @() }
+    
+    try {
+        $data = @(Import-Csv -Path $LogFile -Encoding UTF8)
+        $unknown = $data | Where-Object Category -eq "inconnu" | Group-Object ProcessName | Select-Object @{Name="ProcessName"; Expression={ $_.Name }}, @{Name="Count"; Expression={ $_.Count }}
+        return $unknown
+    }
+    catch {
+        return @()
+    }
+}
+
+Export-ModuleMember -Function Get-ReportData, Export-ReportToJSON, Get-UnknownActivities

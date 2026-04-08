@@ -1,0 +1,45 @@
+﻿{
+    "categories":  [
+                       "travail",
+                       "etude",
+                       "communication",
+                       "distraction",
+                       "inconnu"
+                   ],
+    "processRules":  [
+                         {
+                             "process":  "Code",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "powershell",
+                             "category":  "travail"
+                         }
+                     ],
+    "titleRules":  [
+                       {
+                           "contains":  "YouTube",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "ChatGPT",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "GitHub",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Gmail",
+                           "category":  "communication"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  " OpenClaw — Personal AI Assistant - Google Chrome"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  " ChatGPT - Google Chrome"
+                       }
+                   ]
+}
