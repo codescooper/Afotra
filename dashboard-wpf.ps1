@@ -1,5 +1,5 @@
 # dashboard-wpf.ps1 - Modern WPF Dashboard for AFOTRA - Awema Focus Tracker
-# Author: CodeScooper
+# Author: CodeScooper | Version: 2.0 (Improved)
 # Project: AFOTRA - Awema Focus Tracker
 
 param(
@@ -20,32 +20,61 @@ $configPath = Join-Path $scriptRoot "config.json"
 $rulesPath = Join-Path $scriptRoot "rules.json"
 $logFolder = Join-Path $scriptRoot "logs"
 
-Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
-Import-Module (Join-Path $scriptRoot "modules\Rules.Core.psm1") -Force
-Import-Module (Join-Path $scriptRoot "modules\Report.Core.psm1") -Force
+# Ensure logs folder exists
+if (!(Test-Path $logFolder)) {
+    New-Item -ItemType Directory -Path $logFolder -Force | Out-Null
+}
+if (!(Test-Path (Join-Path $logFolder "reports"))) {
+    New-Item -ItemType Directory -Path (Join-Path $logFolder "reports") -Force | Out-Null
+}
 
-# Load configuration
-$config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
+# Import modules with error handling
+try {
+    Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
+    Import-Module (Join-Path $scriptRoot "modules\Rules.Core.psm1") -Force
+    Import-Module (Join-Path $scriptRoot "modules\Report.Core.psm1") -Force
+} catch {
+    [Windows.MessageBox]::Show("Error loading modules: $_", "AFOTRA Error") | Out-Null
+    exit 1
+}
+
+# Load configuration with fallback
+$config = $null
+if (Test-Path $configPath) {
+    $config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
+} else {
+    $config = @{
+        sampleIntervalSeconds = 10
+        focusMinPerDay = 480
+        maxDistractionMinPerDay = 120
+        logFolder = "logs"
+    }
+}
+
 $rules = Load-Rules -RulesPath $rulesPath
 
 # Make configuration global for timer access
 $global:config = $config
 $global:rules = $rules
 $global:logFolder = $logFolder
+$global:rulesPath = $rulesPath
+$global:configPath = $configPath
 
 # Global state
 $global:TrackerRunning = $false
 $global:TrackerTimer = $null
-$global:CurrentView = "Dashboard"
+$global:CurrentView = "DashboardView"
 $global:CurrentActivityStart = $null
 $global:CurrentActivityInfo = $null
 $global:CurrentLogFile = $null
+$global:DashboardUpdateTimer = $null
+$global:LastActivityGroup = $null
 
 # XAML for the main window
-[xml]$xaml = @"
+$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="AFOTRA - Awema Focus Tracker" Height="800" Width="1200"
+        Title="AFOTRA - Awema Focus Tracker v2.0" Height="900" Width="1400"
         WindowStartupLocation="CenterScreen" Background="#F5F7FA">
     <Window.Resources>
         <SolidColorBrush x:Key="PrimaryBrush" Color="#2563EB"/>
@@ -57,145 +86,132 @@ $global:CurrentLogFile = $null
         <SolidColorBrush x:Key="TextPrimary" Color="#1F2937"/>
         <SolidColorBrush x:Key="TextSecondary" Color="#6B7280"/>
         <Style x:Key="CardStyle" TargetType="Border">
-            <Setter Property="Background" Value="{StaticResource CardBackground}"/>
-            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="CornerRadius" Value="8"/>
             <Setter Property="BorderBrush" Value="#E5E7EB"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Effect">
-                <Setter.Value>
-                    <DropShadowEffect BlurRadius="8" ShadowDepth="2" Color="#000000" Opacity="0.1"/>
-                </Setter.Value>
-            </Setter>
         </Style>
         <Style x:Key="PrimaryButtonStyle" TargetType="Button">
-            <Setter Property="Background" Value="{StaticResource PrimaryBrush}"/>
+            <Setter Property="Background" Value="#2563EB"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="FontSize" Value="14"/>
-            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Padding" Value="12,8"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" CornerRadius="8" BorderThickness="0">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter Property="Background" Value="#1D4ED8"/>
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter Property="Background" Value="#1E40AF"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
         </Style>
-    </Window.Resources>
     <Grid>
         <!-- Sidebar Navigation -->
-        <Border Background="{StaticResource PrimaryBrush}" Width="250" HorizontalAlignment="Left">
+        <Border Background="#2563EB" Width="260" HorizontalAlignment="Left">
             <StackPanel Margin="20">
-                <TextBlock Text="AFOTRA" FontSize="24" FontWeight="Bold" Foreground="White" Margin="0,0,0,30"/>
-                <Button x:Name="NavDashboard" Content="📊 Dashboard" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,10" Background="Transparent"/>
-                <Button x:Name="NavLiveTracking" Content="🎯 Live Tracking" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,10" Background="Transparent"/>
-                <Button x:Name="NavUnknownActivities" Content="❓ Unknown Activities" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,10" Background="Transparent"/>
-                <Button x:Name="NavRulesCategories" Content="⚙️ Rules &amp; Categories" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,10" Background="Transparent"/>
-                <Button x:Name="NavAnalytics" Content="📈 Analytics" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,10" Background="Transparent"/>
-                <Button x:Name="NavSettings" Content="🔧 Settings" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,30" Background="Transparent"/>
-                <Separator Background="#4B5563"/>
-                <Button x:Name="BtnStartStop" Content="▶ Start Tracking" Style="{StaticResource PrimaryButtonStyle}" Margin="0,20,0,0" Background="#10B981"/>
-                <TextBlock x:Name="StatusText" Text="Status: Stopped" Foreground="White" Margin="0,10,0,0" FontSize="12"/>
+                <TextBlock Text="AFOTRA" FontSize="26" FontWeight="Bold" Foreground="White" Margin="0,0,0,10"/>
+                <TextBlock Text="Focus Tracker" FontSize="12" Foreground="#E0EFFE" Margin="0,0,0,30" TextAlignment="Center"/>
+                
+                <Button x:Name="NavDashboard" Content="Dashboard" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
+                <Button x:Name="NavLiveTracking" Content="Live Tracking" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
+                <Button x:Name="NavUnknownActivities" Content="Unknown" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
+                <Button x:Name="NavRulesCategories" Content="Rules" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,30"/>
+                
+                <Separator Background="#4B5563" Margin="0,0,0,20"/>
+                
+                <Button x:Name="BtnStartStop" Content="Start Tracking" Background="#10B981" Foreground="White" FontWeight="Bold" FontSize="14" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,12" Height="42"/>
+                <TextBlock x:Name="StatusText" Text="Status: Stopped ⏸️" Foreground="White" Margin="0,10,0,0" FontSize="11" TextAlignment="Center" FontWeight="SemiBold"/>
+                <TextBlock x:Name="CurrentProcessText" Text="Process: --" Foreground="#E0EFFE" Margin="0,15,0,0" FontSize="10" TextWrapping="Wrap"/>
             </StackPanel>
         </Border>
 
         <!-- Main Content Area -->
-        <ScrollViewer Margin="270,20,20,20" VerticalScrollBarVisibility="Auto">
+        <ScrollViewer Margin="280,20,20,20" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="MainContent" Margin="0,0,0,20">
+                
                 <!-- Dashboard View -->
                 <StackPanel x:Name="DashboardView" Visibility="Visible">
-                    <TextBlock Text="Dashboard" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
+                    <TextBlock Text="Dashboard" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
                     
-                    <!-- Stats Cards Row 1 -->
-                    <WrapPanel Margin="0,0,0,20">
-                        <Border Style="{StaticResource CardStyle}" Width="280" Height="120" Margin="0,0,20,0">
-                            <StackPanel Margin="20">
-                                <TextBlock Text="Total Time" FontSize="14" Foreground="{StaticResource TextSecondary}"/>
-                                <TextBlock x:Name="TotalTimeText" Text="00:00:00" FontSize="28" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,5,0,0"/>
+                    <!-- Stats Cards Grid -->
+                    <Grid Margin="0,0,0,20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
+                            <StackPanel Margin="15">
+                                <TextBlock Text="Total Time" FontSize="12" Foreground="#6B7280"/>
+                                <TextBlock x:Name="TotalTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#1F2937" Margin="0,5,0,0"/>
                             </StackPanel>
                         </Border>
-                        <Border Style="{StaticResource CardStyle}" Width="280" Height="120" Margin="0,0,20,0">
-                            <StackPanel Margin="20">
-                                <TextBlock Text="Focus Time" FontSize="14" Foreground="{StaticResource TextSecondary}"/>
-                                <TextBlock x:Name="FocusTimeText" Text="00:00:00" FontSize="28" FontWeight="Bold" Foreground="{StaticResource SuccessBrush}" Margin="0,5,0,0"/>
+                        <Border Grid.Column="1" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
+                            <StackPanel Margin="15">
+                                <TextBlock Text="Focus Time" FontSize="12" Foreground="#6B7280"/>
+                                <TextBlock x:Name="FocusTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#10B981" Margin="0,5,0,0"/>
                             </StackPanel>
                         </Border>
-                        <Border Style="{StaticResource CardStyle}" Width="280" Height="120">
-                            <StackPanel Margin="20">
-                                <TextBlock Text="Focus Score" FontSize="14" Foreground="{StaticResource TextSecondary}"/>
-                                <TextBlock x:Name="FocusScoreText" Text="0%" FontSize="28" FontWeight="Bold" Foreground="{StaticResource PrimaryBrush}" Margin="0,5,0,0"/>
+                        <Border Grid.Column="2" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
+                            <StackPanel Margin="15">
+                                <TextBlock Text="Focus Score" FontSize="12" Foreground="#6B7280"/>
+                                <TextBlock x:Name="FocusScoreText" Text="0%" FontSize="26" FontWeight="Bold" Foreground="#2563EB" Margin="0,5,0,0"/>
                             </StackPanel>
                         </Border>
-                    </WrapPanel>
-
-                    <!-- Stats Cards Row 2 -->
-                    <WrapPanel Margin="0,0,0,20">
-                        <Border Style="{StaticResource CardStyle}" Width="280" Height="120" Margin="0,0,20,0">
-                            <StackPanel Margin="20">
-                                <TextBlock Text="Distraction Time" FontSize="14" Foreground="{StaticResource TextSecondary}"/>
-                                <TextBlock x:Name="DistractionTimeText" Text="00:00:00" FontSize="28" FontWeight="Bold" Foreground="{StaticResource DangerBrush}" Margin="0,5,0,0"/>
+                        <Border Grid.Column="3" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
+                            <StackPanel Margin="15">
+                                <TextBlock Text="Distractions" FontSize="12" Foreground="#6B7280"/>
+                                <TextBlock x:Name="DistractionTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#EF4444" Margin="0,5,0,0"/>
                             </StackPanel>
                         </Border>
-                        <Border Style="{StaticResource CardStyle}" Width="280" Height="120" Margin="0,0,20,0">
-                            <StackPanel Margin="20">
-                                <TextBlock Text="Context Switches" FontSize="14" Foreground="{StaticResource TextSecondary}"/>
-                                <TextBlock x:Name="ContextSwitchesText" Text="0" FontSize="28" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,5,0,0"/>
-                            </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource CardStyle}" Width="280" Height="120">
-                            <StackPanel Margin="20">
-                                <TextBlock Text="Current Activity" FontSize="14" Foreground="{StaticResource TextSecondary}"/>
-                                <TextBlock x:Name="CurrentActivityText" Text="None" FontSize="16" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,5,0,0" TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Border>
-                    </WrapPanel>
+                    </Grid>
 
                     <!-- Charts Section -->
-                    <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Activity Distribution" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
-                            <Canvas x:Name="ActivityChartCanvas" Width="800" Height="300" Background="#F9FAFB"/>
+                            <TextBlock Text="Activity Distribution" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
+                            <Canvas x:Name="ActivityChartCanvas" Width="1000" Height="280" Background="#F9FAFB"/>
                         </StackPanel>
                     </Border>
+                    
+                    <!-- Quick Actions -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                        <Button x:Name="BtnGenerateReport" Content="Generate Report" Background="#3B82F6" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,10,0"/>
+                        <Button x:Name="BtnOpenLogs" Content="Open Logs" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
+                    </StackPanel>
                 </StackPanel>
 
                 <!-- Live Tracking View -->
                 <StackPanel x:Name="LiveTrackingView" Visibility="Collapsed">
-                    <TextBlock Text="Live Tracking" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
+                    <TextBlock Text="Live Tracking" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
                     
-                    <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Current Session" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
+                            <TextBlock Text="Current Activity" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
                             <Grid>
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                                    <TextBlock Text="Process:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="LiveProcessText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                    <TextBlock Text="Window Title:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="LiveWindowText" Text="--" FontSize="14" Margin="0,5,0,10" TextWrapping="Wrap"/>
+                                    <TextBlock Text="Process:" FontWeight="SemiBold" Foreground="#6B7280"/>
+                                    <TextBlock x:Name="LiveProcessText" Text="--" FontSize="16" Margin="0,5,0,10" Foreground="#1F2937" FontFamily="Consolas"/>
+                                    <TextBlock Text="Window Title:" FontWeight="SemiBold" Foreground="#6B7280"/>
+                                    <TextBlock x:Name="LiveWindowText" Text="--" FontSize="13" Margin="0,5,0,10" TextWrapping="Wrap" Foreground="#1F2937"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Category:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="LiveCategoryText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                    <TextBlock Text="Time on Current:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="LiveCurrentTimeText" Text="00:00:00" FontSize="16" Margin="0,5,0,10"/>
+                                    <TextBlock Text="Category:" FontWeight="SemiBold" Foreground="#6B7280"/>
+                                    <TextBlock x:Name="LiveCategoryText" Text="--" FontSize="16" Margin="0,5,0,10" Foreground="#10B981" FontWeight="Bold"/>
+                                    <TextBlock Text="Duration:" FontWeight="SemiBold" Foreground="#6B7280"/>
+                                    <TextBlock x:Name="LiveCurrentTimeText" Text="00:00:00" FontSize="16" Margin="0,5,0,10" Foreground="#1F2937" FontFamily="Consolas" FontWeight="Bold"/>
                                 </StackPanel>
                             </Grid>
+                        </StackPanel>
+                    </Border>
+                    
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel Margin="20">
+                            <TextBlock Text="Last 10 Activities" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
+                            <DataGrid x:Name="RecentActivitiesGrid" Height="280" AutoGenerateColumns="False" IsReadOnly="True" Background="White" RowDetailsVisibilityMode="VisibleWhenSelected">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="70"/>
+                                    <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="100"/>
+                                    <DataGridTextColumn Header="Window Title" Binding="{Binding Title}" Width="*"/>
+                                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="100"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -204,19 +220,19 @@ $global:CurrentLogFile = $null
                 <StackPanel x:Name="UnknownActivitiesView" Visibility="Collapsed">
                     <TextBlock Text="Unknown Activities" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
                     
-                    <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
+                    <Border Style="{StaticResource CardStyle}">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Activities marked as 'inconnu'" FontSize="16" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,15"/>
-                            <DataGrid x:Name="UnknownActivitiesGrid" Height="300" AutoGenerateColumns="False" IsReadOnly="True">
+                            <TextBlock Text="Categorize unclassified activities to improve tracking" FontSize="14" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,15"/>
+                            <DataGrid x:Name="UnknownActivitiesGrid" Height="350" AutoGenerateColumns="False" IsReadOnly="True" Background="White" CanUserAddRows="False">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Process" Binding="{Binding ProcessName}" Width="*"/>
-                                    <DataGridTextColumn Header="Window Title" Binding="{Binding WindowTitle}" Width="2*"/>
-                                    <DataGridTextColumn Header="Occurrences" Binding="{Binding Count}" Width="100"/>
+                                    <DataGridTextColumn Header="Process" Binding="{Binding ProcessName}" Width="150"/>
+                                    <DataGridTextColumn Header="Window Title" Binding="{Binding WindowTitle}" Width="*"/>
+                                    <DataGridTextColumn Header="Count" Binding="{Binding Count}" Width="80"/>
                                     <DataGridTextColumn Header="Total Time" Binding="{Binding TotalTime}" Width="100"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
-                                <Button x:Name="BtnCategorizeUnknown" Content="Categorize Selected" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0"/>
+                                <Button x:Name="BtnCategorizeUnknown" Content="Categorize Selected" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" Background="{StaticResource SuccessBrush}"/>
                                 <Button x:Name="BtnRefreshUnknown" Content="Refresh" Style="{StaticResource PrimaryButtonStyle}" Background="{StaticResource SecondaryBrush}"/>
                             </StackPanel>
                         </StackPanel>
@@ -227,106 +243,38 @@ $global:CurrentLogFile = $null
                 <StackPanel x:Name="RulesCategoriesView" Visibility="Collapsed">
                     <TextBlock Text="Rules &amp; Categories" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
                     
-                    <WrapPanel Margin="0,0,0,20">
-                        <Border Style="{StaticResource CardStyle}" Width="400" Margin="0,0,20,0">
+                    <Grid Margin="0,0,0,20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/>
+                        </Grid.ColumnDefinitions>
+                        
+                        <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,10,0">
                             <StackPanel Margin="20">
-                                <TextBlock Text="Categories" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
-                                <ListBox x:Name="CategoriesListBox" Height="200"/>
+                                <TextBlock Text="Categories" FontSize="16" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
+                                <ListBox x:Name="CategoriesListBox" Height="150" Background="White" FontSize="13"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
-                                    <TextBox x:Name="NewCategoryTextBox" Width="200" Margin="0,0,10,0"/>
-                                    <Button x:Name="BtnAddCategory" Content="Add" Style="{StaticResource PrimaryButtonStyle}"/>
+                                    <TextBox x:Name="NewCategoryTextBox" Width="240" Padding="8" Margin="0,0,10,0" Background="White"/>
+                                    <Button x:Name="BtnAddCategory" Content="Add" Style="{StaticResource PrimaryButtonStyle}" Width="90"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
                         
-                        <Border Style="{StaticResource CardStyle}" Width="400">
+                        <Border Grid.Column="1" Style="{StaticResource CardStyle}">
                             <StackPanel Margin="20">
-                                <TextBlock Text="Rules" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
-                                <DataGrid x:Name="RulesGrid" Height="200" AutoGenerateColumns="False">
+                                <TextBlock Text="Process Rules" FontSize="16" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
+                                <DataGrid x:Name="ProcessRulesGrid" Height="150" AutoGenerateColumns="False" Background="White" CanUserAddRows="False">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="80"/>
-                                        <DataGridTextColumn Header="Pattern" Binding="{Binding Pattern}" Width="*"/>
-                                        <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="100"/>
+                                        <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*"/>
+                                        <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="120"/>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
-                                    <Button x:Name="BtnAddRule" Content="Add Rule" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0"/>
-                                    <Button x:Name="BtnEditRule" Content="Edit" Style="{StaticResource PrimaryButtonStyle}" Background="{StaticResource SecondaryBrush}" Margin="0,0,10,0"/>
-                                    <Button x:Name="BtnDeleteRule" Content="Delete" Style="{StaticResource PrimaryButtonStyle}" Background="{StaticResource DangerBrush}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Button x:Name="BtnAddProcessRule" Content="Add Rule" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" Width="120"/>
+                                    <Button x:Name="BtnDeleteProcessRule" Content="Delete" Style="{StaticResource PrimaryButtonStyle}" Background="{StaticResource DangerBrush}" Width="100"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
-                    </WrapPanel>
-                </StackPanel>
-
-                <!-- Analytics View -->
-                <StackPanel x:Name="AnalyticsView" Visibility="Collapsed">
-                    <TextBlock Text="Analytics" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
-                    
-                    <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
-                        <StackPanel Margin="20">
-                            <TextBlock Text="Top Applications" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
-                            <Canvas x:Name="TopAppsChartCanvas" Width="800" Height="300" Background="#F9FAFB"/>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Style="{StaticResource CardStyle}" Margin="0,0,0,20">
-                        <StackPanel Margin="20">
-                            <TextBlock Text="Daily Summary" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                                    <TextBlock Text="Most Productive Hour:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="MostProductiveHourText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                    <TextBlock Text="Longest Focus Session:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="LongestFocusSessionText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Margin="0,0,20,0">
-                                    <TextBlock Text="Total Context Switches:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="TotalContextSwitchesText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                    <TextBlock Text="Average Session Length:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="AverageSessionLengthText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Peak Productivity:" FontWeight="SemiBold" Foreground="{StaticResource TextSecondary}"/>
-                                    <TextBlock x:Name="PeakProductivityText" Text="--" FontSize="16" Margin="0,5,0,10"/>
-                                    <Button x:Name="BtnGenerateDetailedReport" Content="Generate Detailed Report" Style="{StaticResource PrimaryButtonStyle}" Margin="0,10,0,0"/>
-                                </StackPanel>
-                            </Grid>
-                        </StackPanel>
-                    </Border>
-                </StackPanel>
-
-                <!-- Settings View -->
-                <StackPanel x:Name="SettingsView" Visibility="Collapsed">
-                    <TextBlock Text="Settings" FontSize="32" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,20"/>
-                    
-                    <Border Style="{StaticResource CardStyle}">
-                        <StackPanel Margin="20">
-                            <TextBlock Text="Tracking Configuration" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,15"/>
-                            <Grid Margin="0,0,0,15">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="200"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Sample Interval (seconds):" VerticalAlignment="Center"/>
-                                <TextBox x:Name="SampleIntervalTextBox" Grid.Column="1" Text="10" Margin="10,0,0,0"/>
-                            </Grid>
-                            <Grid Margin="0,0,0,15">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="200"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Focus Goal (minutes/day):" VerticalAlignment="Center"/>
-                                <TextBox x:Name="FocusGoalTextBox" Grid.Column="1" Text="480" Margin="10,0,0,0"/>
-                            </Grid>
-                            <Button x:Name="BtnSaveSettings" Content="Save Settings" Style="{StaticResource PrimaryButtonStyle}" HorizontalAlignment="Left"/>
-                        </StackPanel>
-                    </Border>
+                    </Grid>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>
@@ -335,7 +283,7 @@ $global:CurrentLogFile = $null
 "@
 
 # Load XAML
-$reader = New-Object System.Xml.XmlNodeReader $xaml
+$reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 # Get UI elements
@@ -343,25 +291,25 @@ $navDashboard = $window.FindName("NavDashboard")
 $navLiveTracking = $window.FindName("NavLiveTracking")
 $navUnknownActivities = $window.FindName("NavUnknownActivities")
 $navRulesCategories = $window.FindName("NavRulesCategories")
-$navAnalytics = $window.FindName("NavAnalytics")
-$navSettings = $window.FindName("NavSettings")
 $btnStartStop = $window.FindName("BtnStartStop")
 $statusText = $window.FindName("StatusText")
+$currentProcessText = $window.FindName("CurrentProcessText")
 
 # Dashboard elements
 $totalTimeText = $window.FindName("TotalTimeText")
 $focusTimeText = $window.FindName("FocusTimeText")
 $focusScoreText = $window.FindName("FocusScoreText")
 $distractionTimeText = $window.FindName("DistractionTimeText")
-$contextSwitchesText = $window.FindName("ContextSwitchesText")
-$currentActivityText = $window.FindName("CurrentActivityText")
 $activityChartCanvas = $window.FindName("ActivityChartCanvas")
+$btnGenerateReport = $window.FindName("BtnGenerateReport")
+$btnOpenLogs = $window.FindName("BtnOpenLogs")
 
 # Live Tracking elements
 $liveProcessText = $window.FindName("LiveProcessText")
 $liveWindowText = $window.FindName("LiveWindowText")
 $liveCategoryText = $window.FindName("LiveCategoryText")
 $liveCurrentTimeText = $window.FindName("LiveCurrentTimeText")
+$recentActivitiesGrid = $window.FindName("RecentActivitiesGrid")
 
 # Unknown Activities elements
 $unknownActivitiesGrid = $window.FindName("UnknownActivitiesGrid")
@@ -372,398 +320,164 @@ $btnRefreshUnknown = $window.FindName("BtnRefreshUnknown")
 $categoriesListBox = $window.FindName("CategoriesListBox")
 $newCategoryTextBox = $window.FindName("NewCategoryTextBox")
 $btnAddCategory = $window.FindName("BtnAddCategory")
-$rulesGrid = $window.FindName("RulesGrid")
-$btnAddRule = $window.FindName("BtnAddRule")
-$btnEditRule = $window.FindName("BtnEditRule")
-$btnDeleteRule = $window.FindName("BtnDeleteRule")
+$processRulesGrid = $window.FindName("ProcessRulesGrid")
+$btnAddProcessRule = $window.FindName("BtnAddProcessRule")
+$btnDeleteProcessRule = $window.FindName("BtnDeleteProcessRule")
 
-# Analytics elements
-$topAppsChartCanvas = $window.FindName("TopAppsChartCanvas")
-$mostProductiveHourText = $window.FindName("MostProductiveHourText")
-$longestFocusSessionText = $window.FindName("LongestFocusSessionText")
-$totalContextSwitchesText = $window.FindName("TotalContextSwitchesText")
-$averageSessionLengthText = $window.FindName("AverageSessionLengthText")
-$peakProductivityText = $window.FindName("PeakProductivityText")
-$btnGenerateDetailedReport = $window.FindName("BtnGenerateDetailedReport")
-
-# Settings elements
-$sampleIntervalTextBox = $window.FindName("SampleIntervalTextBox")
-$focusGoalTextBox = $window.FindName("FocusGoalTextBox")
-$btnSaveSettings = $window.FindName("BtnSaveSettings")
-
-# View management functions
+# View management
 function Show-View {
     param($viewName)
-    
-    $views = @("DashboardView", "LiveTrackingView", "UnknownActivitiesView", "RulesCategoriesView", "AnalyticsView", "SettingsView")
+    $views = @("DashboardView", "LiveTrackingView", "UnknownActivitiesView", "RulesCategoriesView")
     foreach ($view in $views) {
-        $viewElement = $window.FindName($view)
+        $element = $window.FindName($view)
         if ($view -eq $viewName) {
-            $viewElement.Visibility = "Visible"
-            # Update view-specific data
-            if ($view -eq "AnalyticsView") {
-                Update-Analytics
-            } elseif ($view -eq "UnknownActivitiesView") {
-                Update-UnknownActivities
-            }
+            $element.Visibility = "Visible"
+            if ($view -eq "UnknownActivitiesView") { Update-UnknownActivities }
+            elseif ($view -eq "RulesCategoriesView") { Update-Rules-UI }
         } else {
-            $viewElement.Visibility = "Collapsed"
+            $element.Visibility = "Collapsed"
         }
     }
     $global:CurrentView = $viewName
 }
 
-# Navigation event handlers
 $navDashboard.Add_Click({ Show-View "DashboardView" })
 $navLiveTracking.Add_Click({ Show-View "LiveTrackingView" })
 $navUnknownActivities.Add_Click({ Show-View "UnknownActivitiesView" })
 $navRulesCategories.Add_Click({ Show-View "RulesCategoriesView" })
-$navAnalytics.Add_Click({ Show-View "AnalyticsView" })
-$navSettings.Add_Click({ Show-View "SettingsView" })
 
-# Initialize UI with data
+# Initialize UI
 function Initialize-UI {
-    # Load categories
     $categoriesListBox.Items.Clear()
-    foreach ($category in $rules.categories) {
-        $categoriesListBox.Items.Add($category)
+    foreach ($category in $global:rules.categories) {
+        $categoriesListBox.Items.Add($category) | Out-Null
     }
-    
-    # Load rules
-    $rulesData = @()
-    foreach ($rule in $rules.processRules) {
-        $rulesData += [PSCustomObject]@{
-            Type = "Process"
-            Pattern = $rule.process
-            Category = $rule.category
-        }
-    }
-    foreach ($rule in $rules.titleRules) {
-        $rulesData += [PSCustomObject]@{
-            Type = "Title"
-            Pattern = $rule.contains
-            Category = $rule.category
-        }
-    }
-    $rulesGrid.ItemsSource = $rulesData
-    
-    # Load settings
-    $sampleIntervalTextBox.Text = $config.sampleIntervalSeconds
-    $focusGoalTextBox.Text = $config.focusMinPerDay
-    
-    # Initial dashboard update
+    Update-Rules-UI
     Update-Dashboard
 }
 
-# Dashboard update function
+# Update functions
 function Update-Dashboard {
-    $logFile = Get-TodayLogFile -LogFolder $logFolder
-    if (!(Test-Path $logFile)) {
-        return
-    }
+    $logFile = Get-TodayLogFile -LogFolder $global:logFolder
+    if (!(Test-Path $logFile)) { return }
     
     try {
-        $data = @(Import-Csv -Path $logFile -Encoding UTF8)
+        $data = @(Import-Csv -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue)
         if ($data.Count -eq 0) { return }
         
         $sampleSeconds = [int]$data[0].SampleSeconds
         $totalSeconds = $data.Count * $sampleSeconds
-        
         $categories = @{}
+        
         foreach ($row in $data) {
-            if (!$categories[$row.Category]) {
-                $categories[$row.Category] = 0
-            }
+            if (!$categories[$row.Category]) { $categories[$row.Category] = 0 }
             $categories[$row.Category] += $sampleSeconds
         }
         
         $focusSeconds = if ($categories["travail"]) { $categories["travail"] } else { 0 }
         $distractionSeconds = if ($categories["distraction"]) { $categories["distraction"] } else { 0 }
-        $unknownSeconds = if ($categories["inconnu"]) { $categories["inconnu"] } else { 0 }
-        
         $focusScore = if ($totalSeconds -gt 0) { [math]::Round(($focusSeconds / $totalSeconds) * 100, 1) } else { 0 }
-        $contextSwitches = ($data | Group-Object WindowTitle).Count
         
-        # Update UI
         $totalTimeText.Text = [TimeSpan]::FromSeconds($totalSeconds).ToString('hh\:mm\:ss')
         $focusTimeText.Text = [TimeSpan]::FromSeconds($focusSeconds).ToString('hh\:mm\:ss')
         $distractionTimeText.Text = [TimeSpan]::FromSeconds($distractionSeconds).ToString('hh\:mm\:ss')
         $focusScoreText.Text = "$focusScore%"
-        $contextSwitchesText.Text = $contextSwitches
         
-        # Update current activity display
-        if ($global:TrackerRunning -and $global:CurrentActivityInfo) {
-            $currentActivityText.Text = "$($global:CurrentActivityInfo.ProcessName) - $($global:CurrentActivityInfo.WindowTitle)"
-            
-            # Update live tracking if visible
-            if ($global:CurrentView -eq "LiveTracking") {
-                $liveProcessText.Text = $global:CurrentActivityInfo.ProcessName
-                $liveWindowText.Text = $global:CurrentActivityInfo.WindowTitle
-                $liveCategoryText.Text = $global:CurrentActivityInfo.Category
-                if ($global:CurrentActivityStart) {
-                    $elapsed = (Get-Date) - $global:CurrentActivityStart
-                    $liveCurrentTimeText.Text = $elapsed.ToString('hh\:mm\:ss')
-                }
-            }
-        } else {
-            $currentActivityText.Text = "Tracking stopped"
-            $liveCurrentTimeText.Text = "00:00:00"
+        if ($global:CurrentActivityInfo) {
+            $title = $global:CurrentActivityInfo.WindowTitle
+            if ($title.Length -gt 60) { $title = $title.Substring(0, 57) + "..." }
+            $currentProcessText.Text = "Process: $($global:CurrentActivityInfo.ProcessName)"
         }
         
-        # Update chart
         Update-ActivityChart -Categories $categories -TotalSeconds $totalSeconds
         
-    } catch {
-        if ($Debug) { Write-Host "Error updating dashboard: $_" }
-    }
+        if ($global:CurrentView -eq "LiveTrackingView") {
+            $liveProcessText.Text = $global:CurrentActivityInfo.ProcessName
+            $liveWindowText.Text = $global:CurrentActivityInfo.WindowTitle
+            $liveCategoryText.Text = $global:CurrentActivityInfo.Category
+            if ($global:CurrentActivityStart) {
+                $elapsed = (Get-Date) - $global:CurrentActivityStart
+                $liveCurrentTimeText.Text = $elapsed.ToString('hh\:mm\:ss')
+            }
+            $recentActivities = @($data | Select-Object -Last 10 | ForEach-Object {
+                [PSCustomObject]@{
+                    Time = $_.Time; Process = $_.ProcessName; Title = if ($_.WindowTitle.Length -gt 45) { $_.WindowTitle.Substring(0, 42) + "..." } else { $_.WindowTitle }; Category = $_.Category
+                }
+            })
+            $recentActivitiesGrid.ItemsSource = @($recentActivities | Sort-Object Time -Descending)
+        }
+    } catch { }
 }
 
-# Chart drawing functions
 function Update-ActivityChart {
     param($Categories, $TotalSeconds)
-    
     $activityChartCanvas.Children.Clear()
-    
     if ($TotalSeconds -eq 0) { return }
     
-    $colors = @{
-        "travail" = "#10B981"
-        "distraction" = "#EF4444"
-        "communication" = "#3B82F6"
-        "etude" = "#8B5CF6"
-        "inconnu" = "#F59E0B"
-    }
+    $colors = @{ "travail" = "#10B981"; "distraction" = "#EF4444"; "communication" = "#3B82F6"; "etude" = "#8B5CF6"; "inconnu" = "#F59E0B" }
+    $barWidth = 70; $maxHeight = 180; $x = 60; $legendY = 220
     
-    $barWidth = 60
-    $maxHeight = 200
-    $x = 50
-    $legendY = 250
-    
-    foreach ($category in $Categories.Keys) {
+    foreach ($category in ($Categories.Keys | Sort-Object)) {
         $seconds = $Categories[$category]
         $percentage = $seconds / $TotalSeconds
         $barHeight = [math]::Round($percentage * $maxHeight)
-        
         $color = if ($colors.ContainsKey($category)) { $colors[$category] } else { "#6B7280" }
         
-        # Draw bar
         $rect = New-Object Windows.Shapes.Rectangle
-        $rect.Width = $barWidth
-        $rect.Height = $barHeight
-        $rect.Fill = $color
-        $rect.Stroke = "#374151"
-        $rect.StrokeThickness = 1
-        Canvas.SetLeft $rect $x
-        Canvas.SetTop $rect (220 - $barHeight)
-        $activityChartCanvas.Children.Add($rect)
+        $rect.Width = $barWidth; $rect.Height = $barHeight; $rect.Fill = $color; $rect.Stroke = "#374151"; $rect.StrokeThickness = 1
+        [Windows.Controls.Canvas]::SetLeft($rect, $x); [Windows.Controls.Canvas]::SetTop($rect, 200 - $barHeight)
+        $activityChartCanvas.Children.Add($rect) | Out-Null
         
-        # Percentage text
         $textBlock = New-Object Windows.Controls.TextBlock
-        $textBlock.Text = "$([math]::Round($percentage * 100, 1))%"
-        $textBlock.FontSize = 10
-        $textBlock.Foreground = "#374151"
-        $textBlock.TextAlignment = "Center"
-        $textBlock.Width = $barWidth
-        Canvas.SetLeft $textBlock $x
-        Canvas.SetTop $textBlock 225
-        $activityChartCanvas.Children.Add($textBlock)
-        
-        # Legend
-        $legendRect = New-Object Windows.Shapes.Rectangle
-        $legendRect.Width = 15
-        $legendRect.Height = 15
-        $legendRect.Fill = $color
-        Canvas.SetLeft $legendRect $x
-        Canvas.SetTop $legendRect $legendY
-        $activityChartCanvas.Children.Add($legendRect)
+        $textBlock.Text = "$([math]::Round($percentage * 100, 1))%"; $textBlock.FontSize = 10; $textBlock.Foreground = "#374151"; $textBlock.TextAlignment = "Center"; $textBlock.Width = $barWidth
+        [Windows.Controls.Canvas]::SetLeft($textBlock, $x); [Windows.Controls.Canvas]::SetTop($textBlock, 205)
+        $activityChartCanvas.Children.Add($textBlock) | Out-Null
         
         $legendText = New-Object Windows.Controls.TextBlock
-        $legendText.Text = $category
-        $legendText.FontSize = 10
-        $legendText.Foreground = "#374151"
-        Canvas.SetLeft $legendText ($x + 20)
-        Canvas.SetTop $legendText $legendY
-        $activityChartCanvas.Children.Add($legendText)
+        $legendText.Text = "$category"; $legendText.FontSize = 11; $legendText.Foreground = "#374151"; $legendText.FontWeight = "Bold"
+        [Windows.Controls.Canvas]::SetLeft($legendText, $x - 10); [Windows.Controls.Canvas]::SetTop($legendText, $legendY)
+        $activityChartCanvas.Children.Add($legendText) | Out-Null
         
-        $x += $barWidth + 20
+        $x += $barWidth + 25
     }
 }
 
 function Update-UnknownActivities {
-    $logFile = Get-TodayLogFile -LogFolder $logFolder
-    if (Test-Path $logFile) {
-        $data = Import-Csv -Path $logFile -Encoding UTF8
-        $unknownActivities = $data | Where-Object { $_.Category -eq "inconnu" } | Group-Object ProcessName, WindowTitle | 
-            Select-Object @{Name="ProcessName"; Expression={$_.Name.Split(',')[0]}}, 
-                         @{Name="WindowTitle"; Expression={$_.Name.Split(',')[1]}}, 
-                         @{Name="Count"; Expression={$_.Group.Count}}, 
-                         @{Name="TotalTime"; Expression={[TimeSpan]::FromSeconds($_.Group.Count * [int]$data[0].SampleSeconds).ToString('hh\:mm\:ss')}}
-        
-        $unknownActivitiesGrid.ItemsSource = $unknownActivities
-    }
-}
-
-# Analytics functions
-function Update-Analytics {
-    $logFile = Get-TodayLogFile -LogFolder $logFolder
-    if (!(Test-Path $logFile)) {
-        $mostProductiveHourText.Text = "--"
-        $longestFocusSessionText.Text = "--"
-        $totalContextSwitchesText.Text = "--"
-        $averageSessionLengthText.Text = "--"
-        $peakProductivityText.Text = "--"
-        return
-    }
+    $logFile = Get-TodayLogFile -LogFolder $global:logFolder
+    if (!(Test-Path $logFile)) { $unknownActivitiesGrid.ItemsSource = @(); return }
     
     try {
-        $data = @(Import-Csv -Path $logFile -Encoding UTF8)
-        if ($data.Count -eq 0) { return }
+        $data = @(Import-Csv -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue)
+        if ($data.Count -eq 0) { $unknownActivitiesGrid.ItemsSource = @(); return }
         
         $sampleSeconds = [int]$data[0].SampleSeconds
+        $unknownActivities = @()
+        $grouped = $data | Where-Object { $_.Category -eq "inconnu" } | Group-Object { "$($_.ProcessName)|$($_.WindowTitle)" }
         
-        # Calculate top applications
-        $appUsage = @{}
-        foreach ($row in $data) {
-            if (!$appUsage[$row.ProcessName]) {
-                $appUsage[$row.ProcessName] = 0
-            }
-            $appUsage[$row.ProcessName] += $sampleSeconds
-        }
-        
-        # Update top apps chart
-        Update-TopAppsChart -AppUsage $appUsage
-        
-        # Calculate analytics
-        $totalSeconds = $data.Count * $sampleSeconds
-        $contextSwitches = ($data | Group-Object WindowTitle).Count
-        
-        # Most productive hour (simplified - hour with most "travail" time)
-        $hourlyProductivity = @{}
-        foreach ($row in $data) {
-            $hour = [DateTime]::Parse($row.Time).Hour
-            if (!$hourlyProductivity[$hour]) {
-                $hourlyProductivity[$hour] = @{ Total = 0; Focus = 0 }
-            }
-            $hourlyProductivity[$hour].Total += $sampleSeconds
-            if ($row.Category -eq "travail") {
-                $hourlyProductivity[$hour].Focus += $sampleSeconds
+        foreach ($group in $grouped) {
+            $parts = $group.Name -split '\|'
+            $unknownActivities += [PSCustomObject]@{
+                ProcessName = $parts[0]; WindowTitle = $parts[1]; Count = $group.Count; TotalTime = [TimeSpan]::FromSeconds($group.Count * $sampleSeconds).ToString('hh\:mm\:ss')
             }
         }
-        
-        $mostProductiveHour = $hourlyProductivity.GetEnumerator() | 
-            Sort-Object { $_.Value.Focus } -Descending | 
-            Select-Object -First 1
-        
-        if ($mostProductiveHour) {
-            $hour = $mostProductiveHour.Key
-            $focusMinutes = [math]::Round($mostProductiveHour.Value.Focus / 60, 1)
-            $mostProductiveHourText.Text = "${hour}:00 - ${focusMinutes} min focus"
-        }
-        
-        # Longest focus session (simplified - consecutive "travail" entries)
-        $longestSession = 0
-        $currentSession = 0
-        foreach ($row in $data) {
-            if ($row.Category -eq "travail") {
-                $currentSession += $sampleSeconds
-                if ($currentSession -gt $longestSession) {
-                    $longestSession = $currentSession
-                }
-            } else {
-                $currentSession = 0
-            }
-        }
-        
-        $longestFocusSessionText.Text = [TimeSpan]::FromSeconds($longestSession).ToString('hh\:mm\:ss')
-        $totalContextSwitchesText.Text = $contextSwitches
-        
-        # Average session length (simplified)
-        $sessions = ($data | Group-Object WindowTitle).Count
-        if ($sessions -gt 0) {
-            $avgSessionSeconds = $totalSeconds / $sessions
-            $averageSessionLengthText.Text = [TimeSpan]::FromSeconds($avgSessionSeconds).ToString('mm\:ss')
-        }
-        
-        # Peak productivity (highest focus percentage in any hour)
-        $peakProductivity = $hourlyProductivity.GetEnumerator() | 
-            Where-Object { $_.Value.Total -gt 0 } | 
-            ForEach-Object { [math]::Round(($_.Value.Focus / $_.Value.Total) * 100, 1) } | 
-            Measure-Object -Maximum | 
-            Select-Object -ExpandProperty Maximum
-        
-        $peakProductivityText.Text = "$peakProductivity%"
-        
-    } catch {
-        if ($Debug) { Write-Host "Error updating analytics: $_" }
-    }
+        $unknownActivitiesGrid.ItemsSource = @($unknownActivities)
+    } catch { }
 }
 
-function Update-TopAppsChart {
-    param($AppUsage)
-    
-    $topAppsChartCanvas.Children.Clear()
-    
-    if ($AppUsage.Count -eq 0) { return }
-    
-    $topApps = $AppUsage.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5
-    $maxTime = ($topApps | Measure-Object Value -Maximum).Maximum
-    
-    $barWidth = 80
-    $maxHeight = 200
-    $x = 50
-    $legendY = 250
-    
-    $index = 0
-    foreach ($app in $topApps) {
-        $percentage = if ($maxTime -gt 0) { $app.Value / $maxTime } else { 0 }
-        $barHeight = [math]::Round($percentage * $maxHeight)
-        
-        $colors = @("#10B981", "#3B82F6", "#F59E0B", "#EF4444", "#8B5CF6")
-        $color = $colors[$index % $colors.Length]
-        
-        # Draw bar
-        $rect = New-Object Windows.Shapes.Rectangle
-        $rect.Width = $barWidth
-        $rect.Height = $barHeight
-        $rect.Fill = $color
-        $rect.Stroke = "#374151"
-        $rect.StrokeThickness = 1
-        Canvas.SetLeft $rect $x
-        Canvas.SetTop $rect (220 - $barHeight)
-        $topAppsChartCanvas.Children.Add($rect)
-        
-        # Time text
-        $timeText = [TimeSpan]::FromSeconds($app.Value).ToString('hh\:mm\:ss')
-        $textBlock = New-Object Windows.Controls.TextBlock
-        $textBlock.Text = $timeText
-        $textBlock.FontSize = 10
-        $textBlock.Foreground = "#374151"
-        $textBlock.TextAlignment = "Center"
-        $textBlock.Width = $barWidth
-        Canvas.SetLeft $textBlock $x
-        Canvas.SetTop $textBlock 225
-        $topAppsChartCanvas.Children.Add($textBlock)
-        
-        # App name
-        $appText = New-Object Windows.Controls.TextBlock
-        $appText.Text = $app.Key
-        $appText.FontSize = 9
-        $appText.Foreground = "#374151"
-        $appText.TextAlignment = "Center"
-        $appText.Width = $barWidth
-        Canvas.SetLeft $appText $x
-        Canvas.SetTop $appText 240
-        $topAppsChartCanvas.Children.Add($appText)
-        
-        $x += $barWidth + 20
-        $index++
-    }
+function Update-Rules-UI {
+    try {
+        $global:rules = Load-Rules -RulesPath $global:rulesPath
+        $rulesData = @()
+        foreach ($rule in $global:rules.processRules) {
+            $rulesData += [PSCustomObject]@{ Process = $rule.process; Category = $rule.category }
+        }
+        $processRulesGrid.ItemsSource = @($rulesData)
+    } catch { }
 }
 
-# Tracking functions
+# Tracking button
 $btnStartStop.Add_Click({
     if (!$global:TrackerRunning) {
-        # Start tracking
         $global:TrackerRunning = $true
         $global:CurrentLogFile = Get-TodayLogFile -LogFolder $global:logFolder
         Initialize-LogFile -LogFile $global:CurrentLogFile
@@ -780,163 +494,147 @@ $btnStartStop.Add_Click({
                     $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
                     Write-ActivityLog -LogFile $global:CurrentLogFile -ActivityInfo $info -SampleSeconds $global:config.sampleIntervalSeconds
                     
-                    # Track current activity time
                     $currentTime = Get-Date
-                    if ($global:CurrentActivityInfo -and 
-                        $global:CurrentActivityInfo.ProcessName -eq $info.ProcessName -and 
-                        $global:CurrentActivityInfo.WindowTitle -eq $info.WindowTitle) {
-                        # Same activity, update time
+                    if ($global:CurrentActivityInfo -and $global:CurrentActivityInfo.ProcessName -eq $info.ProcessName -and $global:CurrentActivityInfo.WindowTitle -eq $info.WindowTitle) {
                         $elapsed = $currentTime - $global:CurrentActivityStart
                         $global:CurrentActivityDuration = $elapsed.ToString('hh\:mm\:ss')
                     } else {
-                        # New activity
                         $global:CurrentActivityStart = $currentTime
                         $global:CurrentActivityInfo = $info
                         $global:CurrentActivityDuration = "00:00:00"
                     }
                 }
-            } catch {
-                # Silently ignore errors in timer
-            }
+            } catch { }
         }
         
-        Register-ObjectEvent -InputObject $global:TrackerTimer -EventName Elapsed -Action $action | Out-Null
+        Register-ObjectEvent -InputObject $global:TrackerTimer -EventName Elapsed -Action $action -ErrorAction SilentlyContinue | Out-Null
         $global:TrackerTimer.Start()
         
         $btnStartStop.Content = "⏹ Stop Tracking"
         $btnStartStop.Background = "#EF4444"
+        $statusText.Text = "Status: Running ⏱️"
         
     } else {
-        # Stop tracking
         $global:TrackerRunning = $false
-        if ($global:TrackerTimer) {
-            $global:TrackerTimer.Stop()
-            $global:TrackerTimer.Dispose()
-            $global:TrackerTimer = $null
-        }
-        
-        $statusText.Text = "Status: Stopped"
-        $btnStartStop.Content = "▶ Start Tracking"
+        if ($global:TrackerTimer) { $global:TrackerTimer.Stop(); $global:TrackerTimer.Dispose(); $global:TrackerTimer = $null }
+        $statusText.Text = "Status: Stopped ⏸️"
+        $btnStartStop.Content = "Start Tracking"
         $btnStartStop.Background = "#10B981"
-        
-        # Final update
         Update-Dashboard
     }
 })
 
-# Unknown activities functions
-$btnRefreshUnknown.Add_Click({
-    $logFile = Get-TodayLogFile -LogFolder $logFolder
-    if (Test-Path $logFile) {
-        $data = Import-Csv -Path $logFile -Encoding UTF8
-        $unknownActivities = $data | Where-Object { $_.Category -eq "inconnu" } | Group-Object ProcessName, WindowTitle | 
-            Select-Object @{Name="ProcessName"; Expression={$_.Name.Split(',')[0]}}, 
-                         @{Name="WindowTitle"; Expression={$_.Name.Split(',')[1]}}, 
-                         @{Name="Count"; Expression={$_.Group.Count}}, 
-                         @{Name="TotalTime"; Expression={[TimeSpan]::FromSeconds($_.Group.Count * [int]$data[0].SampleSeconds).ToString('hh\:mm\:ss')}}
-        
-        $unknownActivitiesGrid.ItemsSource = $unknownActivities
-    }
-})
-
+# Actions
+$btnRefreshUnknown.Add_Click({ Update-UnknownActivities })
 $btnCategorizeUnknown.Add_Click({
     $selectedItem = $unknownActivitiesGrid.SelectedItem
-    if ($selectedItem) {
-        # Show categorization dialog
-        $categorizeWindow = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]@"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Categorize Activity" Height="300" Width="400" WindowStartupLocation="CenterOwner">
-    <StackPanel Margin="20">
-        <TextBlock Text="Categorize Unknown Activity" FontSize="16" FontWeight="Bold" Margin="0,0,0,15"/>
-        <TextBlock Text="Process:" FontWeight="SemiBold"/>
-        <TextBlock Text="$($selectedItem.ProcessName)" Margin="0,5,0,10"/>
-        <TextBlock Text="Window Title:" FontWeight="SemiBold"/>
-        <TextBlock Text="$($selectedItem.WindowTitle)" Margin="0,5,0,15" TextWrapping="Wrap"/>
-        <TextBlock Text="Assign to category:" FontWeight="SemiBold"/>
-        <ComboBox x:Name="CategoryComboBox" Margin="0,5,0,15"/>
-        <TextBlock Text="Create rule based on:" FontWeight="SemiBold"/>
-        <StackPanel Orientation="Horizontal" Margin="0,5,0,15">
-            <RadioButton x:Name="RuleByProcess" Content="Process Name" IsChecked="True"/>
-            <RadioButton x:Name="RuleByTitle" Content="Window Title" Margin="20,0,0,0"/>
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="BtnCancel" Content="Cancel" Margin="0,0,10,0" Padding="15,5"/>
-            <Button x:Name="BtnSaveCategory" Content="Save" Padding="15,5" Background="#10B981" Foreground="White"/>
-        </StackPanel>
-    </StackPanel>
-</Window>
-"@)))
-        
-        $categoryComboBox = $categorizeWindow.FindName("CategoryComboBox")
-        $ruleByProcess = $categorizeWindow.FindName("RuleByProcess")
-        $ruleByTitle = $categorizeWindow.FindName("RuleByTitle")
-        $btnCancel = $categorizeWindow.FindName("BtnCancel")
-        $btnSaveCategory = $categorizeWindow.FindName("BtnSaveCategory")
-        
-        # Populate categories
-        foreach ($category in $rules.categories) {
-            $categoryComboBox.Items.Add($category)
-        }
-        $categoryComboBox.SelectedIndex = 0
-        
-        $btnCancel.Add_Click({ $categorizeWindow.Close() })
-        
-        $btnSaveCategory.Add_Click({
-            $selectedCategory = $categoryComboBox.SelectedItem
-            if ($ruleByProcess.IsChecked) {
-                $rules.processRules += @{ process = $selectedItem.ProcessName; category = $selectedCategory }
-            } else {
-                $rules.titleRules += @{ contains = $selectedItem.WindowTitle; category = $selectedCategory }
-            }
-            
-            # Save rules
-            Save-Rules -Rules $rules -RulesPath $rulesPath
-            
-            # Refresh UI
-            Initialize-UI
-            $btnRefreshUnknown.RaiseEvent((New-Object Windows.RoutedEventArgs ([Windows.Controls.Button]::ClickEvent)))
-            
-            $categorizeWindow.Close()
-        })
-        
-        $categorizeWindow.ShowDialog()
+    if (!$selectedItem) { [Windows.MessageBox]::Show("Select an activity first.", "AFOTRA") | Out-Null; return }
+    
+    Add-Type -AssemblyName System.Windows.Forms; $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Categorize Activity"; $form.Width = 450; $form.Height = 300; $form.StartPosition = "CenterParent"
+    
+    $label = New-Object System.Windows.Forms.Label; $label.Text = "Process: $($selectedItem.ProcessName)"; $label.Location = New-Object System.Drawing.Point(10, 20); $label.AutoSize = $true; $form.Controls.Add($label)
+    $combo = New-Object System.Windows.Forms.ComboBox; $combo.Location = New-Object System.Drawing.Point(10, 80); $combo.Width = 400
+    foreach ($cat in $global:rules.categories) { $combo.Items.Add($cat) | Out-Null }
+    $combo.SelectedIndex = 0; $form.Controls.Add($combo)
+    
+    $radio1 = New-Object System.Windows.Forms.RadioButton; $radio1.Text = "Process Name"; $radio1.Location = New-Object System.Drawing.Point(10, 140); $radio1.Checked = $true; $form.Controls.Add($radio1)
+    $radio2 = New-Object System.Windows.Forms.RadioButton; $radio2.Text = "Window Title"; $radio2.Location = New-Object System.Drawing.Point(200, 140); $form.Controls.Add($radio2)
+    
+    $btnOk = New-Object System.Windows.Forms.Button; $btnOk.Text = "OK"; $btnOk.Location = New-Object System.Drawing.Point(280, 210); $btnOk.DialogResult = "OK"; $form.Controls.Add($btnOk)
+    $btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.Location = New-Object System.Drawing.Point(360, 210); $btnCancel.DialogResult = "Cancel"; $form.Controls.Add($btnCancel)
+    
+    if ($form.ShowDialog() -eq "OK") {
+        if ($radio1.Checked) { Add-ProcessRule -Rules $global:rules -Process $selectedItem.ProcessName -Category $combo.SelectedItem }
+        else { Add-TitleRule -Rules $global:rules -Contains $selectedItem.WindowTitle -Category $combo.SelectedItem }
+        Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
+        Update-Rules-UI; Update-UnknownActivities
+        [Windows.MessageBox]::Show("Rule created!", "AFOTRA") | Out-Null
     }
+    $form.Dispose()
 })
 
-# Categories functions
 $btnAddCategory.Add_Click({
     $newCategory = $newCategoryTextBox.Text.Trim()
-    if ($newCategory -and $rules.categories -notcontains $newCategory) {
-        $rules.categories += $newCategory
-        Save-Rules -Rules $rules -RulesPath $rulesPath
-        Initialize-UI
-        $newCategoryTextBox.Text = ""
+    if ($newCategory -and $global:rules.categories -notcontains $newCategory) {
+        Add-Category -Rules $global:rules -Category $newCategory | Out-Null
+        Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
+        Initialize-UI; $newCategoryTextBox.Text = ""
     }
 })
 
-# Settings functions
-$btnSaveSettings.Add_Click({
-    $config.sampleIntervalSeconds = [int]$sampleIntervalTextBox.Text
-    $config.focusMinPerDay = [int]$focusGoalTextBox.Text
-    $config | ConvertTo-Json -Depth 10 | Set-Content -Path $configPath -Encoding UTF8
-    [Windows.MessageBox]::Show("Settings saved!", "AFOTRA")
+$btnAddProcessRule.Add_Click({
+    Add-Type -AssemblyName System.Windows.Forms; $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Add Process Rule"; $form.Width = 400; $form.Height = 250; $form.StartPosition = "CenterParent"
+    
+    $label1 = New-Object System.Windows.Forms.Label; $label1.Text = "Process Name:"; $label1.Location = New-Object System.Drawing.Point(10, 20); $label1.AutoSize = $true; $form.Controls.Add($label1)
+    $text = New-Object System.Windows.Forms.TextBox; $text.Location = New-Object System.Drawing.Point(10, 45); $text.Width = 370; $form.Controls.Add($text)
+    
+    $label2 = New-Object System.Windows.Forms.Label; $label2.Text = "Category:"; $label2.Location = New-Object System.Drawing.Point(10, 80); $label2.AutoSize = $true; $form.Controls.Add($label2)
+    $combo = New-Object System.Windows.Forms.ComboBox; $combo.Location = New-Object System.Drawing.Point(10, 105); $combo.Width = 370
+    foreach ($cat in $global:rules.categories) { $combo.Items.Add($cat) | Out-Null }
+    $combo.SelectedIndex = 0; $form.Controls.Add($combo)
+    
+    $btnOk = New-Object System.Windows.Forms.Button; $btnOk.Text = "OK"; $btnOk.Location = New-Object System.Drawing.Point(240, 170); $btnOk.DialogResult = "OK"; $form.Controls.Add($btnOk)
+    $btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.Location = New-Object System.Drawing.Point(320, 170); $btnCancel.DialogResult = "Cancel"; $form.Controls.Add($btnCancel)
+    
+    if ($form.ShowDialog() -eq "OK" -and $text.Text.Trim()) {
+        Add-ProcessRule -Rules $global:rules -Process $text.Text.Trim() -Category $combo.SelectedItem
+        Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
+        Update-Rules-UI
+    }
+    $form.Dispose()
 })
 
-# Analytics functions
-$btnGenerateDetailedReport.Add_Click({
-    $logFile = Get-TodayLogFile -LogFolder $logFolder
+$btnDeleteProcessRule.Add_Click({
+    $selectedItem = $processRulesGrid.SelectedItem
+    if ($selectedItem) {
+        $global:rules.processRules = $global:rules.processRules | Where-Object { $_.process -ne $selectedItem.Process }
+        Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
+        Update-Rules-UI
+    }
+})
+
+$btnGenerateReport.Add_Click({
+    $logFile = Get-TodayLogFile -LogFolder $global:logFolder
     if (Test-Path $logFile) {
-        $reportData = Get-ReportData -LogFile $logFile
-        if ($reportData) {
-            $date = Get-Date -Format "yyyy-MM-dd"
-            $jsonFile = Join-Path (Join-Path $logFolder "reports") "detailed-$date.json"
-            Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile
-            [Windows.MessageBox]::Show("Detailed report generated!`n`nFile: $jsonFile", "AFOTRA")
+        try {
+            $reportData = Get-ReportData -LogFile $logFile
+            if ($reportData) {
+                $date = Get-Date -Format "yyyy-MM-dd"
+                $jsonFile = Join-Path (Join-Path $global:logFolder "reports") "summary-$date.json"
+                Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile
+                [Windows.MessageBox]::Show("Report generated!`n`n$jsonFile", "AFOTRA") | Out-Null
+                Explorer.exe $jsonFile
+            }
+        } catch {
+            [Windows.MessageBox]::Show("Error: $_", "AFOTRA") | Out-Null
         }
     }
 })
 
-# Initialize and show window
+$btnOpenLogs.Add_Click({
+    if (Test-Path $global:logFolder) { Explorer.exe $global:logFolder }
+})
+
+# Update timer
+$global:DashboardUpdateTimer = New-Object System.Timers.Timer
+$global:DashboardUpdateTimer.Interval = 1500
+$global:DashboardUpdateTimer.AutoReset = $true
+$dashboardAction = { if ($global:TrackerRunning) { Update-Dashboard } }
+Register-ObjectEvent -InputObject $global:DashboardUpdateTimer -EventName Elapsed -Action $dashboardAction -ErrorAction SilentlyContinue | Out-Null
+$global:DashboardUpdateTimer.Start()
+
+# Window cleanup
+$window.Add_Closing({
+    try {
+        if ($global:TrackerTimer) { $global:TrackerTimer.Stop(); $global:TrackerTimer.Dispose() }
+        if ($global:DashboardUpdateTimer) { $global:DashboardUpdateTimer.Stop(); $global:DashboardUpdateTimer.Dispose() }
+    } catch { }
+})
+
 Initialize-UI
 $window.ShowDialog() | Out-Null
+
+if ($global:TrackerTimer) { $global:TrackerTimer.Stop(); $global:TrackerTimer.Dispose() }
+if ($global:DashboardUpdateTimer) { $global:DashboardUpdateTimer.Stop(); $global:DashboardUpdateTimer.Dispose() }
