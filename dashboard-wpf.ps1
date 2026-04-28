@@ -9,7 +9,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 # This dashboard requires Windows + Desktop .NET (WPF)
-if (-not $IsWindows) {
+# $IsWindows only exists in PowerShell 6+; on Windows PowerShell 5.x we are always on Windows
+$isWindowsOS = if ($PSVersionTable.PSVersion.Major -ge 6) { $IsWindows } else { $true }
+if (-not $isWindowsOS) {
     throw "AFOTRA dashboard-wpf.ps1 requires Windows (WPF is not available on this OS)."
 }
 
@@ -76,6 +78,16 @@ $global:DashboardUpdateTimer = $null
 $global:LastActivityGroup = $null
 $global:TrackerTimerEventSub = $null
 $global:DashboardTimerEventSub = $null
+$global:TrackerBusy = $false
+$global:OverlayWindow = $null
+$global:OverlayDispTimer = $null
+$global:DistractionStreakStart = $null
+$global:ShakeActive = $false
+$global:ShakeBaseLeft = 20.0
+$global:ShakeStep = 0
+$global:OverlayMinimized = $false
+$global:AlarmActive = $false
+$global:AlarmThread = $null
 
 # XAML for the main window
 $xaml = @"
@@ -123,8 +135,9 @@ $xaml = @"
                 <Separator Background="#4B5563" Margin="0,0,0,20"/>
                 
                 <Button x:Name="BtnStartStop" Content="Start Tracking" Background="#10B981" Foreground="White" FontWeight="Bold" FontSize="14" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,12" Height="42"/>
-                <TextBlock x:Name="StatusText" Text="Status: Stopped ⏸️" Foreground="White" Margin="0,10,0,0" FontSize="11" TextAlignment="Center" FontWeight="SemiBold"/>
+                <TextBlock x:Name="StatusText" Text="Status: Stopped" Foreground="White" Margin="0,10,0,0" FontSize="11" TextAlignment="Center" FontWeight="SemiBold"/>
                 <TextBlock x:Name="CurrentProcessText" Text="Process: --" Foreground="#E0EFFE" Margin="0,15,0,0" FontSize="10" TextWrapping="Wrap"/>
+                <Button x:Name="BtnToggleOverlay" Content="Afficher Overlay" Background="#374151" Foreground="White" FontWeight="SemiBold" FontSize="11" Padding="12,6" BorderThickness="0" Cursor="Hand" Margin="0,12,0,0"/>
             </StackPanel>
         </Border>
 
@@ -283,6 +296,18 @@ $xaml = @"
                             </StackPanel>
                         </Border>
                     </Grid>
+
+                    <!-- Chrome History Analysis -->
+                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
+                        <StackPanel Margin="20">
+                            <TextBlock Text="Analyse Historique Chrome" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,8"/>
+                            <TextBlock Text="Détecte les domaines les plus visités et crée des règles automatiquement." FontSize="12" Foreground="#6B7280" Margin="0,0,0,12"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button x:Name="BtnAnalyzeChrome" Content="Analyser Chrome" Background="#EA580C" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
+                                <TextBlock x:Name="ChromeStatusText" Text="" Foreground="#6B7280" FontSize="12" Margin="15,0,0,0" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>
@@ -340,6 +365,9 @@ $btnAddCategory = $window.FindName("BtnAddCategory")
 $processRulesGrid = $window.FindName("ProcessRulesGrid")
 $btnAddProcessRule = $window.FindName("BtnAddProcessRule")
 $btnDeleteProcessRule = $window.FindName("BtnDeleteProcessRule")
+$btnAnalyzeChrome = $window.FindName("BtnAnalyzeChrome")
+$chromeStatusText = $window.FindName("ChromeStatusText")
+$btnToggleOverlay = $window.FindName("BtnToggleOverlay")
 
 # View management
 function Show-View {
@@ -528,24 +556,14 @@ function Update-Rules-UI {
 function Stop-TrackingTimer {
     if ($global:TrackerTimer) {
         $global:TrackerTimer.Stop()
-        $global:TrackerTimer.Dispose()
         $global:TrackerTimer = $null
-    }
-    if ($global:TrackerTimerEventSub) {
-        Unregister-Event -SubscriptionId $global:TrackerTimerEventSub.Id -ErrorAction SilentlyContinue
-        $global:TrackerTimerEventSub = $null
     }
 }
 
 function Stop-DashboardTimer {
     if ($global:DashboardUpdateTimer) {
         $global:DashboardUpdateTimer.Stop()
-        $global:DashboardUpdateTimer.Dispose()
         $global:DashboardUpdateTimer = $null
-    }
-    if ($global:DashboardTimerEventSub) {
-        Unregister-Event -SubscriptionId $global:DashboardTimerEventSub.Id -ErrorAction SilentlyContinue
-        $global:DashboardTimerEventSub = $null
     }
 }
 
@@ -556,42 +574,38 @@ $btnStartStop.Add_Click({
         $global:CurrentLogFile = Get-TodayLogFile -LogFolder $global:logFolder
         Initialize-LogFile -LogFile $global:CurrentLogFile
         
-        $global:TrackerTimer = New-Object System.Timers.Timer
-        $global:TrackerTimer.Interval = $global:config.sampleIntervalSeconds * 1000
-        $global:TrackerTimer.AutoReset = $true
-        
-        $action = {
-            try {
-                $info = Get-ActiveWindowInfo
-                if ($info) {
+        # DispatcherTimer runs on the WPF UI thread — same runspace as imported modules
+        $global:TrackerTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $global:TrackerTimer.Interval = [TimeSpan]::FromSeconds($global:config.sampleIntervalSeconds)
+
+        $global:TrackerTimer.Add_Tick({
+            $info = Get-ActiveWindowInfo
+            if ($info) {
+                $isAfotraWindow = ($info.ProcessName -eq "powershell" -and $info.WindowTitle -like "*AFOTRA*")
+                if (-not $isAfotraWindow) {
                     $category = Classify-Activity -ProcessName $info.ProcessName -WindowTitle $info.WindowTitle -Rules $global:rules
                     $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
                     Write-ActivityLog -LogFile $global:CurrentLogFile -ActivityInfo $info -SampleSeconds $global:config.sampleIntervalSeconds
-                    
-                    $currentTime = Get-Date
-                    if ($global:CurrentActivityInfo -and $global:CurrentActivityInfo.ProcessName -eq $info.ProcessName -and $global:CurrentActivityInfo.WindowTitle -eq $info.WindowTitle) {
-                        $elapsed = $currentTime - $global:CurrentActivityStart
-                        $global:CurrentActivityDuration = $elapsed.ToString('hh\:mm\:ss')
-                    } else {
-                        $global:CurrentActivityStart = $currentTime
-                        $global:CurrentActivityInfo = $info
-                        $global:CurrentActivityDuration = "00:00:00"
+
+                    if (-not ($global:CurrentActivityInfo -and
+                              $global:CurrentActivityInfo.ProcessName -eq $info.ProcessName -and
+                              $global:CurrentActivityInfo.WindowTitle  -eq $info.WindowTitle)) {
+                        $global:CurrentActivityStart = Get-Date
+                        $global:CurrentActivityInfo  = $info
                     }
                 }
-            } catch { }
-        }
-        
-        $global:TrackerTimerEventSub = Register-ObjectEvent -InputObject $global:TrackerTimer -EventName Elapsed -Action $action -ErrorAction SilentlyContinue
+            }
+        })
         $global:TrackerTimer.Start()
         
-        $btnStartStop.Content = "⏹ Stop Tracking"
+        $btnStartStop.Content = "Stop Tracking"
         $btnStartStop.Background = "#EF4444"
-        $statusText.Text = "Status: Running ⏱️"
+        $statusText.Text = "Status: Running..."
         
     } else {
         $global:TrackerRunning = $false
         Stop-TrackingTimer
-        $statusText.Text = "Status: Stopped ⏸️"
+        $statusText.Text = "Status: Stopped"
         $btnStartStop.Content = "Start Tracking"
         $btnStartStop.Background = "#10B981"
         Update-Dashboard
@@ -669,6 +683,111 @@ $btnDeleteProcessRule.Add_Click({
     }
 })
 
+$btnAnalyzeChrome.Add_Click({
+    $chromeStatusText.Text = "Analyse en cours..."
+    $btnAnalyzeChrome.IsEnabled = $false
+
+    $domains = Get-ChromeTopDomains -Top 60
+
+    $btnAnalyzeChrome.IsEnabled = $true
+
+    if (-not $domains -or $domains.Count -eq 0) {
+        $chromeStatusText.Text = "Historique Chrome introuvable ou vide."
+        return
+    }
+
+    # Filter out already-ruled domains
+    $existingRules = @($global:rules.titleRules | ForEach-Object { $_.contains.ToLower() })
+    $newDomains = @($domains | Where-Object {
+        $d = $_.Domain
+        -not ($existingRules | Where-Object { $_ -like "*$d*" })
+    })
+
+    if ($newDomains.Count -eq 0) {
+        $chromeStatusText.Text = "Tous les domaines ont déjà une règle."
+        return
+    }
+
+    # Build a WinForms dialog listing all new domains with a ComboBox per row
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Catégoriser les domaines Chrome"
+    $form.Width = 680; $form.Height = 600
+    $form.StartPosition = "CenterParent"
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Dock = "Fill"; $panel.AutoScroll = $true
+    $form.Controls.Add($panel)
+
+    $categories = @($global:rules.categories)
+
+    $y = 10
+    $controls = @()
+
+    # Header
+    $hDomain  = New-Object System.Windows.Forms.Label; $hDomain.Text = "Domaine"; $hDomain.Location = New-Object System.Drawing.Point(10, $y); $hDomain.Width = 300; $hDomain.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $panel.Controls.Add($hDomain)
+    $hCount   = New-Object System.Windows.Forms.Label; $hCount.Text = "Visites"; $hCount.Location = New-Object System.Drawing.Point(315, $y); $hCount.Width = 60; $hCount.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $panel.Controls.Add($hCount)
+    $hCat     = New-Object System.Windows.Forms.Label; $hCat.Text = "Catégorie"; $hCat.Location = New-Object System.Drawing.Point(380, $y); $hCat.Width = 180; $hCat.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold); $panel.Controls.Add($hCat)
+    $y += 28
+
+    foreach ($domain in $newDomains) {
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = $domain.Domain; $lbl.Location = New-Object System.Drawing.Point(10, $y); $lbl.Width = 300; $lbl.AutoEllipsis = $true
+        $panel.Controls.Add($lbl)
+
+        $cnt = New-Object System.Windows.Forms.Label
+        $cnt.Text = "$($domain.Count)"; $cnt.Location = New-Object System.Drawing.Point(315, $y); $cnt.Width = 60; $cnt.ForeColor = [System.Drawing.Color]::Gray
+        $panel.Controls.Add($cnt)
+
+        $combo = New-Object System.Windows.Forms.ComboBox
+        $combo.Location = New-Object System.Drawing.Point(380, ($y - 2)); $combo.Width = 180; $combo.DropDownStyle = "DropDownList"
+        $combo.Items.Add("(ignorer)") | Out-Null
+        foreach ($cat in $categories) { $combo.Items.Add($cat) | Out-Null }
+        $combo.SelectedIndex = 0
+        $panel.Controls.Add($combo)
+
+        $controls += [PSCustomObject]@{ Domain = $domain.Domain; Combo = $combo }
+        $y += 30
+    }
+
+    # Bottom buttons
+    $btnPanel = New-Object System.Windows.Forms.Panel
+    $btnPanel.Dock = "Bottom"; $btnPanel.Height = 50
+    $form.Controls.Add($btnPanel)
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = "Appliquer les règles"; $btnOk.Location = New-Object System.Drawing.Point(430, 12); $btnOk.Width = 160; $btnOk.DialogResult = "OK"
+    $btnPanel.Controls.Add($btnOk)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Annuler"; $btnCancel.Location = New-Object System.Drawing.Point(598, 12); $btnCancel.Width = 70; $btnCancel.DialogResult = "Cancel"
+    $btnPanel.Controls.Add($btnCancel)
+
+    if ($form.ShowDialog() -eq "OK") {
+        $added = 0
+        foreach ($row in $controls) {
+            if ($row.Combo.SelectedIndex -gt 0) {
+                $cat = $row.Combo.SelectedItem.ToString()
+                Add-TitleRule -Rules $global:rules -Contains $row.Domain -Category $cat
+                $added++
+            }
+        }
+        if ($added -gt 0) {
+            Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
+            Update-Rules-UI
+            $chromeStatusText.Text = "$added règle(s) ajoutée(s) !"
+        } else {
+            $chromeStatusText.Text = "Aucune règle ajoutée."
+        }
+    } else {
+        $chromeStatusText.Text = ""
+    }
+    $form.Dispose()
+})
+
 $btnGenerateReport.Add_Click({
     $logFile = Get-TodayLogFile -LogFolder $global:logFolder
     if (Test-Path $logFile) {
@@ -691,28 +810,361 @@ $btnOpenLogs.Add_Click({
     if (Test-Path $global:logFolder) { Explorer.exe $global:logFolder }
 })
 
-# Update timer
-$global:DashboardUpdateTimer = New-Object System.Timers.Timer
-$global:DashboardUpdateTimer.Interval = 1500
-$global:DashboardUpdateTimer.AutoReset = $true
-$dashboardAction = {
-    if ($global:TrackerRunning) {
-        Invoke-OnUIThread { Update-Dashboard }
-    }
-}
-$global:DashboardTimerEventSub = Register-ObjectEvent -InputObject $global:DashboardUpdateTimer -EventName Elapsed -Action $dashboardAction -ErrorAction SilentlyContinue
+# Dashboard refresh timer — DispatcherTimer, UI thread, no Invoke-OnUIThread needed
+$global:DashboardUpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
+$global:DashboardUpdateTimer.Interval = [TimeSpan]::FromMilliseconds(2000)
+$global:DashboardUpdateTimer.Add_Tick({ Update-Dashboard })
 $global:DashboardUpdateTimer.Start()
 
-# Window cleanup
+# ===================================================================
+# OVERLAY WINDOW — toujours visible, non-modal, always-on-top
+# ===================================================================
+$overlayXaml = @"
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="AFOTRA Live"
+    Width="310"
+    SizeToContent="Height"
+    WindowStyle="None"
+    AllowsTransparency="True"
+    Background="Transparent"
+    Topmost="True"
+    ShowInTaskbar="False"
+    ShowActivated="False"
+    Left="20" Top="20">
+  <Border x:Name="OvRootBorder" Background="#DC1F2937" CornerRadius="10" Margin="5">
+    <Border.Effect>
+      <DropShadowEffect Color="Black" Opacity="0.55" BlurRadius="10" ShadowDepth="3"/>
+    </Border.Effect>
+    <StackPanel>
+      <!-- Header — toujours visible, zone de drag -->
+      <Grid x:Name="OvHeader" Margin="10,8,8,6">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Ellipse x:Name="OvStatusDot" Width="7" Height="7" Fill="#6B7280" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <TextBlock Text="AFOTRA LIVE" FontSize="9" FontWeight="Bold" Foreground="#6B7280"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+          <Button x:Name="BtnOverlayStartStop" Content="Start" Background="#10B981" Foreground="White" FontWeight="Bold" FontSize="10" Padding="8,3" BorderThickness="0" Cursor="Hand" Margin="0,0,5,0"/>
+          <Button x:Name="BtnMinimizeOverlay" Content="-" Background="Transparent" Foreground="#4B5563" BorderThickness="0" FontSize="13" Cursor="Hand" Padding="5,0" VerticalAlignment="Center"/>
+          <Button x:Name="BtnCloseOverlay"   Content="X" Background="Transparent" Foreground="#4B5563" BorderThickness="0" FontSize="11" Cursor="Hand" Padding="5,0" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Grid>
+      <!-- Contenu repliable -->
+      <StackPanel x:Name="OvContent" Margin="10,0,10,10">
+        <Separator Background="#2D3748" Margin="0,0,0,8"/>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0">
+            <TextBlock x:Name="OvProcess" Text="--" FontSize="15" FontWeight="Bold" Foreground="White" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="OvTitle"   Text="--" FontSize="10" Foreground="#9CA3AF" TextTrimming="CharacterEllipsis"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" HorizontalAlignment="Right" Margin="8,0,0,0">
+            <Border x:Name="OvCatBadge" CornerRadius="4" Padding="7,3" HorizontalAlignment="Right" Background="#374151">
+              <TextBlock x:Name="OvCategory" Text="--" FontSize="10" FontWeight="Bold" Foreground="White"/>
+            </Border>
+            <TextBlock x:Name="OvDuration" Text="00:00:00" FontSize="12" Foreground="#E5E7EB" TextAlignment="Right" Margin="0,4,0,0" FontFamily="Consolas"/>
+          </StackPanel>
+        </Grid>
+        <Grid Margin="0,8,0,0">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="Focus:" FontSize="10" Foreground="#6B7280" VerticalAlignment="Center"/>
+            <TextBlock x:Name="OvFocusScore" Text="0%" FontSize="10" FontWeight="Bold" Foreground="#10B981" Margin="4,0,10,0" VerticalAlignment="Center"/>
+            <TextBlock Text="Tracké:" FontSize="10" Foreground="#6B7280" VerticalAlignment="Center"/>
+            <TextBlock x:Name="OvTotalTime" Text="0m" FontSize="10" Foreground="#D1D5DB" Margin="4,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+          <TextBlock x:Name="OvAlertText" Text="" FontSize="10" FontWeight="Bold" Foreground="#FCA5A5" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+        </Grid>
+      </StackPanel>
+    </StackPanel>
+  </Border>
+</Window>
+"@
+
+try {
+    $ovReader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($overlayXaml))
+    $global:OverlayWindow = [Windows.Markup.XamlReader]::Load($ovReader)
+} catch {
+    [Windows.MessageBox]::Show("Overlay XAML error: $_", "AFOTRA") | Out-Null
+}
+
+if ($global:OverlayWindow) {
+    $ovRootBorder        = $global:OverlayWindow.FindName("OvRootBorder")
+    $ovContent           = $global:OverlayWindow.FindName("OvContent")
+    $ovProcess           = $global:OverlayWindow.FindName("OvProcess")
+    $ovTitle             = $global:OverlayWindow.FindName("OvTitle")
+    $ovCategory          = $global:OverlayWindow.FindName("OvCategory")
+    $ovCatBadge          = $global:OverlayWindow.FindName("OvCatBadge")
+    $ovDuration          = $global:OverlayWindow.FindName("OvDuration")
+    $ovFocusScore        = $global:OverlayWindow.FindName("OvFocusScore")
+    $ovTotalTime         = $global:OverlayWindow.FindName("OvTotalTime")
+    $ovAlertText         = $global:OverlayWindow.FindName("OvAlertText")
+    $ovStatusDot         = $global:OverlayWindow.FindName("OvStatusDot")
+    $btnOverlayStartStop = $global:OverlayWindow.FindName("BtnOverlayStartStop")
+    $btnMinimizeOverlay  = $global:OverlayWindow.FindName("BtnMinimizeOverlay")
+    $btnCloseOverlay     = $global:OverlayWindow.FindName("BtnCloseOverlay")
+
+    # Drag sur la fenêtre entière, mais annulé si le clic vient d'un bouton
+    $global:OverlayWindow.Add_MouseLeftButtonDown({
+        param($s, $e)
+        # Remonter l'arbre visuel depuis la source — si on croise un Button, ne pas dragger
+        $el = $e.OriginalSource
+        while ($null -ne $el) {
+            if ($el -is [System.Windows.Controls.Primitives.ButtonBase]) { return }
+            $el = try { [System.Windows.Media.VisualTreeHelper]::GetParent($el) } catch { $null }
+        }
+        $global:OverlayWindow.DragMove()
+    })
+
+    # --- Bouton ✕ : masquer ---
+    $btnCloseOverlay.Add_Click({
+        $global:OverlayWindow.Hide()
+        $btnToggleOverlay.Content = "Afficher Overlay"
+    })
+
+    # --- Bouton — : replier / déplier ---
+    $btnMinimizeOverlay.Add_Click({
+        if ($global:OverlayMinimized) {
+            $ovContent.Visibility = "Visible"
+            $btnMinimizeOverlay.Content = "-"
+            $global:OverlayMinimized = $false
+        } else {
+            $ovContent.Visibility = "Collapsed"
+            $btnMinimizeOverlay.Content = "+"
+            $global:OverlayMinimized = $true
+        }
+    })
+
+    # --- Bouton Start/Stop overlay : déclenche le bouton principal ---
+    $btnOverlayStartStop.Add_Click({
+        $btnStartStop.RaiseEvent(
+            [System.Windows.RoutedEventArgs]::new(
+                [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent
+            )
+        )
+    })
+
+    $categoryColors = @{
+        "travail"       = "#10B981"
+        "distraction"   = "#EF4444"
+        "communication" = "#3B82F6"
+        "etude"         = "#8B5CF6"
+        "inconnu"       = "#F59E0B"
+    }
+
+    # --- Shake : pattern de positions X relatives ---
+    $shakePattern = @(0,12,-12,12,-12,12,-12,10,-10,8,-8,5,-5,2,-2,0,0,0,0,0)
+
+    $global:ShakeWobbleTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $global:ShakeWobbleTimer.Interval = [TimeSpan]::FromMilliseconds(55)
+    $global:ShakeWobbleTimer.Add_Tick({
+        if ($global:ShakeStep -ge $shakePattern.Count) {
+            $global:ShakeWobbleTimer.Stop()
+            $global:OverlayWindow.Left = $global:ShakeBaseLeft
+            $global:ShakeStep = 0
+            return
+        }
+        $global:OverlayWindow.Left = $global:ShakeBaseLeft + $shakePattern[$global:ShakeStep]
+        $global:ShakeStep++
+    })
+
+    # Déclencheur périodique : secoue toutes les 7s si ShakeActive
+    $global:ShakeTriggerTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $global:ShakeTriggerTimer.Interval = [TimeSpan]::FromSeconds(7)
+    $global:ShakeTriggerTimer.Add_Tick({
+        if (-not $global:ShakeActive) { $global:ShakeTriggerTimer.Stop(); return }
+        $global:ShakeBaseLeft = $global:OverlayWindow.Left
+        $global:ShakeStep = 0
+        $global:ShakeWobbleTimer.Start()
+    })
+
+    # --- Alarme sonore sur thread séparé (Console.Beep ne bloque pas l'UI) ---
+    function Start-Alarm {
+        if ($global:AlarmActive) { return }
+        $global:AlarmActive = $true
+        $t = New-Object System.Threading.Thread({
+            while ($global:AlarmActive) {
+                try {
+                    # Séquence agaçante : montée rapide + pause courte
+                    [System.Console]::Beep(880,  180)
+                    [System.Threading.Thread]::Sleep(60)
+                    [System.Console]::Beep(1100, 180)
+                    [System.Threading.Thread]::Sleep(60)
+                    [System.Console]::Beep(1320, 180)
+                    [System.Threading.Thread]::Sleep(60)
+                    [System.Console]::Beep(1100, 180)
+                    [System.Threading.Thread]::Sleep(60)
+                    [System.Console]::Beep(880,  350)
+                    [System.Threading.Thread]::Sleep(700)   # pause avant répétition
+                } catch { break }
+            }
+        })
+        $t.IsBackground = $true
+        $t.Start()
+        $global:AlarmThread = $t
+    }
+
+    function Stop-Alarm {
+        $global:AlarmActive = $false   # le thread s'arrête au prochain test du while
+    }
+
+    function Start-ShakeMode {
+        if ($global:ShakeActive) { return }
+        $global:ShakeActive = $true
+        $global:ShakeBaseLeft = $global:OverlayWindow.Left
+        $ovRootBorder.Background = "#DC7F1213"   # rouge sombre
+        $ovAlertText.Text = "!! DISTRACTION 5min+"
+        # Première secousse immédiate
+        $global:ShakeStep = 0
+        $global:ShakeWobbleTimer.Start()
+        $global:ShakeTriggerTimer.Start()
+        # Ouvrir l'overlay s'il était replié
+        if ($global:OverlayMinimized) {
+            $ovContent.Visibility = "Visible"
+            $btnMinimizeOverlay.Content = "-"
+            $global:OverlayMinimized = $false
+        }
+        Start-Alarm
+    }
+
+    function Stop-ShakeMode {
+        if (-not $global:ShakeActive) { return }
+        $global:ShakeActive = $false
+        $global:ShakeWobbleTimer.Stop()
+        $global:ShakeTriggerTimer.Stop()
+        $global:OverlayWindow.Left = $global:ShakeBaseLeft
+        $ovRootBorder.Background = "#DC1F2937"   # retour normal
+        $ovAlertText.Text = ""
+        Stop-Alarm
+    }
+
+    # --- Update-Overlay ---
+    function Update-Overlay {
+        if (-not $global:OverlayWindow.IsVisible) { return }
+
+        # Activité à afficher
+        $info     = Get-ActiveWindowInfo
+        $isAfotra = $info -and $info.ProcessName -eq "powershell" -and $info.WindowTitle -like "*AFOTRA*"
+        $display  = if ($isAfotra -and $global:CurrentActivityInfo) { $global:CurrentActivityInfo } else { $info }
+
+        $cat = "inconnu"
+        if ($display) {
+            $ovProcess.Text = $display.ProcessName
+            $t = $display.WindowTitle
+            $ovTitle.Text = if ($t.Length -gt 46) { $t.Substring(0,43) + "..." } else { $t }
+
+            $cat = if ($display.PSObject.Properties["Category"] -and $display.Category) {
+                $display.Category
+            } else {
+                Classify-Activity -ProcessName $display.ProcessName -WindowTitle $display.WindowTitle -Rules $global:rules
+            }
+            $ovCategory.Text = $cat
+            $col = if ($categoryColors.ContainsKey($cat)) { $categoryColors[$cat] } else { "#6B7280" }
+            $ovCatBadge.Background = $col
+        }
+
+        # Indicateur running + bouton overlay
+        $isRunning = $global:TrackerRunning
+        $ovStatusDot.Fill = if ($isRunning) { "#10B981" } else { "#6B7280" }
+        if ($isRunning) {
+            $btnOverlayStartStop.Content    = "Stop"
+            $btnOverlayStartStop.Background = "#EF4444"
+        } else {
+            $btnOverlayStartStop.Content    = "Start"
+            $btnOverlayStartStop.Background = "#10B981"
+        }
+
+        # Durée sur la fenêtre courante
+        $ovDuration.Text = if ($global:CurrentActivityStart) {
+            ((Get-Date) - $global:CurrentActivityStart).ToString('hh\:mm\:ss')
+        } else { "00:00:00" }
+
+        # Score focus du jour (lecture CSV légère)
+        $lf = Get-TodayLogFile -LogFolder $global:logFolder
+        if (Test-Path $lf) {
+            try {
+                $rows = @(Import-Csv $lf -Encoding UTF8 -ErrorAction SilentlyContinue)
+                if ($rows.Count -gt 0) {
+                    $ss    = [int]$rows[0].SampleSeconds
+                    $total = $rows.Count * $ss
+                    $focus = ($rows | Where-Object Category -eq "travail" | Measure-Object).Count * $ss
+                    $ovFocusScore.Text = "$(if($total -gt 0){[math]::Round($focus/$total*100,1)}else{0})%"
+                    $ovTotalTime.Text  = "$([math]::Round($total/60,0))m"
+                }
+            } catch {}
+        }
+
+        # --- Logique distraction streak ---
+        if ($isRunning) {
+            if ($cat -eq "distraction") {
+                if (-not $global:DistractionStreakStart) {
+                    $global:DistractionStreakStart = Get-Date
+                }
+                $streakMin = ((Get-Date) - $global:DistractionStreakStart).TotalMinutes
+                if ($streakMin -ge 5) {
+                    Start-ShakeMode
+                }
+            } else {
+                $global:DistractionStreakStart = $null
+                if ($cat -eq "travail" -and $global:ShakeActive) {
+                    Stop-ShakeMode
+                }
+            }
+        }
+    }
+
+    # Overlay refresh 800ms
+    $global:OverlayDispTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $global:OverlayDispTimer.Interval = [TimeSpan]::FromMilliseconds(800)
+    $global:OverlayDispTimer.Add_Tick({ Update-Overlay })
+    $global:OverlayDispTimer.Start()
+
+    # Bouton toggle sidebar
+    $btnToggleOverlay.Add_Click({
+        if ($global:OverlayWindow.IsVisible) {
+            $global:OverlayWindow.Hide()
+            $btnToggleOverlay.Content = "Afficher Overlay"
+        } else {
+            $global:OverlayWindow.Show()
+            $btnToggleOverlay.Content = "Masquer Overlay"
+        }
+    })
+}
+
+# ===================================================================
+# Window cleanup + arrêt du DispatcherFrame
+# ===================================================================
+$global:AppFrame = New-Object System.Windows.Threading.DispatcherFrame
+
 $window.Add_Closing({
     try {
         Stop-TrackingTimer
         Stop-DashboardTimer
+        if ($global:OverlayDispTimer)   { $global:OverlayDispTimer.Stop();   $global:OverlayDispTimer   = $null }
+        if ($global:ShakeWobbleTimer)   { $global:ShakeWobbleTimer.Stop();   $global:ShakeWobbleTimer   = $null }
+        if ($global:ShakeTriggerTimer)  { $global:ShakeTriggerTimer.Stop();  $global:ShakeTriggerTimer  = $null }
+        $global:AlarmActive = $false
+        if ($global:OverlayWindow)      { $global:OverlayWindow.Close();     $global:OverlayWindow      = $null }
     } catch { }
+    # Arrêter la boucle dispatcher pour que le script se termine
+    $global:AppFrame.Continue = $false
 })
 
 Initialize-UI
-$window.ShowDialog() | Out-Null
+
+# Show() au lieu de ShowDialog() — évite le blocage modal des autres fenêtres
+$window.Show()
+
+if ($global:OverlayWindow) {
+    $global:OverlayWindow.Show()
+    $btnToggleOverlay.Content = "Masquer Overlay"
+}
+
+# Garde le script vivant sans créer de fenêtre modale bloquante
+[System.Windows.Threading.Dispatcher]::PushFrame($global:AppFrame)
 
 Stop-TrackingTimer
 Stop-DashboardTimer

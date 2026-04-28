@@ -2,30 +2,33 @@
 # Author: CodeScooper
 # Project: AFOTRA - Awema Focus Tracker
 
-Add-Type -TypeDefinition @"
+if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
+    Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public class Win32 {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    public static extern int GetWindowText(IntPtr hWnd, string lpString, int nMaxCount);
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 }
 "@
+}
 
 function Get-ActiveWindowInfo {
     try {
         $hwnd = [Win32]::GetForegroundWindow()
         if ($hwnd -eq [IntPtr]::Zero) { return $null }
 
-        $title = New-Object char[] 256
+        $title = New-Object System.Text.StringBuilder 256
         [Win32]::GetWindowText($hwnd, $title, 256) | Out-Null
-        $windowTitle = -join $title -replace "`0.*", ""
+        $windowTitle = $title.ToString()
 
         $processId = 0
         [Win32]::GetWindowThreadProcessId($hwnd, [ref]$processId) | Out-Null

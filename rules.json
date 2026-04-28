@@ -12,13 +12,189 @@
                              "category":  "travail"
                          },
                          {
+                             "process":  "Code - Insiders",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "devenv",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "rider",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "idea",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "webstorm",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "pycharm",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "datagrip",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "clion",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "goland",
+                             "category":  "travail"
+                         },
+                         {
                              "process":  "powershell",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "pwsh",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "WindowsTerminal",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "cmd",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "bash",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "git-bash",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "notepad",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "notepad++",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "sublime_text",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "atom",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "WINWORD",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "EXCEL",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "POWERPNT",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "ONENOTE",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "VISIO",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "filezilla",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "winscp",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "dbeaver",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "postman",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "insomnia",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "docker",
+                             "category":  "travail"
+                         },
+                         {
+                             "process":  "OUTLOOK",
+                             "category":  "communication"
+                         },
+                         {
+                             "process":  "Teams",
+                             "category":  "communication"
+                         },
+                         {
+                             "process":  "slack",
+                             "category":  "communication"
+                         },
+                         {
+                             "process":  "Discord",
+                             "category":  "communication"
+                         },
+                         {
+                             "process":  "thunderbird",
+                             "category":  "communication"
+                         },
+                         {
+                             "process":  "Spotify",
+                             "category":  "distraction"
+                         },
+                         {
+                             "process":  "chrome",
                              "category":  "travail"
                          }
                      ],
     "titleRules":  [
                        {
                            "contains":  "YouTube",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "Netflix",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "Twitch",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "Reddit",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "Facebook",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "Instagram",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "Twitter",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "TikTok",
+                           "category":  "distraction"
+                       },
+                       {
+                           "contains":  "9gag",
                            "category":  "distraction"
                        },
                        {
@@ -30,16 +206,352 @@
                            "category":  "travail"
                        },
                        {
+                           "contains":  "GitLab",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Stack Overflow",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "localhost",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "127.0.0.1",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Copilot",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "OpenClaw",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Vercel",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Netlify",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Figma",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Notion",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Jira",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Trello",
+                           "category":  "travail"
+                       },
+                       {
+                           "contains":  "Linear",
+                           "category":  "travail"
+                       },
+                       {
                            "contains":  "Gmail",
                            "category":  "communication"
                        },
                        {
-                           "category":  "travail",
-                           "contains":  " OpenClaw — Personal AI Assistant - Google Chrome"
+                           "contains":  "Outlook",
+                           "category":  "communication"
+                       },
+                       {
+                           "contains":  "Teams",
+                           "category":  "communication"
+                       },
+                       {
+                           "contains":  "Slack",
+                           "category":  "communication"
+                       },
+                       {
+                           "contains":  "WhatsApp",
+                           "category":  "communication"
+                       },
+                       {
+                           "contains":  "Messenger",
+                           "category":  "communication"
+                       },
+                       {
+                           "contains":  "Telegram",
+                           "category":  "communication"
+                       },
+                       {
+                           "contains":  "Udemy",
+                           "category":  "etude"
+                       },
+                       {
+                           "contains":  "Coursera",
+                           "category":  "etude"
+                       },
+                       {
+                           "contains":  "Khan Academy",
+                           "category":  "etude"
+                       },
+                       {
+                           "contains":  "docs.microsoft",
+                           "category":  "etude"
+                       },
+                       {
+                           "contains":  "developer.mozilla",
+                           "category":  "etude"
+                       },
+                       {
+                           "contains":  "learn.microsoft",
+                           "category":  "etude"
+                       },
+                       {
+                           "contains":  "w3schools",
+                           "category":  "etude"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "www.facebook.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "www.youtube.com"
+                       },
+                       {
+                           "category":  "etude",
+                           "contains":  "www.google.com"
                        },
                        {
                            "category":  "travail",
-                           "contains":  " ChatGPT - Google Chrome"
+                           "contains":  "grok.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "chatgpt.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "docs.google.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "badoo.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "facebook.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "higgsfield.ai"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "www.tiktok.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "youtube.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "accounts.google.com"
+                       },
+                       {
+                           "category":  "communication",
+                           "contains":  "web.whatsapp.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "wifizone.net"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "admin.shopify.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "mail.google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "github.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "www.capcut.com"
+                       },
+                       {
+                           "category":  "etude",
+                           "contains":  "app.reve.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "tiktok.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "www.instagram.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "education-odd-com-431901.builder-preview.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "cloud.mtn.ci"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "platform.claude.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "sora.chatgpt.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "accounts.shopify.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "meet.google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "notebooklm.google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "www.canva.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "hpanel.hostinger.com"
+                       },
+                       {
+                           "category":  "inconnu",
+                           "contains":  "assets.zyrosite.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "script.google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "lagrandevision.ci"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "l.facebook.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "photos.google.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "www.icloud.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "gemini.google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "suno.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "claude.ai"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "www.googleapis.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "cpanel.lagrandevision.ci"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "asilidermparis.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "studio.youtube.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "codescooper.github.io"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "fr.savefrom.net"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "fr.pinterest.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "fontawesome.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "auth.hostinger.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "www.treatwell.fr"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "builder.hostinger.com"
+                       },
+                       {
+                           "category":  "distraction",
+                           "contains":  "web.facebook.com"
+                       },
+                       {
+                           "category":  "inconnu",
+                           "contains":  "nya2.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "business.facebook.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "ogs.google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "auth.openai.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "code.claude.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "freshluts.com"
+                       },
+                       {
+                           "category":  "etude",
+                           "contains":  "google.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "capcut.com"
+                       },
+                       {
+                           "category":  "travail",
+                           "contains":  "www.hostinger.com"
                        }
                    ]
 }

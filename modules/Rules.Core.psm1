@@ -36,23 +36,64 @@ function Classify-Activity {
         [string]$WindowTitle,
         [object]$Rules
     )
-    
-    # Check process rules first (case-insensitive)
-    foreach ($rule in $Rules.processRules) {
-        if ($ProcessName -like "*$($rule.process)*") {
-            return $rule.category
+
+    # For browsers, title rules have priority (a YouTube tab must beat "chrome → travail")
+    $browserProcesses = @("chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "iexplore")
+    $isBrowser = $false
+    foreach ($b in $browserProcesses) {
+        if ($ProcessName -like "*$b*") { $isBrowser = $true; break }
+    }
+
+    if (-not $isBrowser) {
+        # Non-browser apps: process name is the most reliable signal → check first
+        foreach ($rule in $Rules.processRules) {
+            if ($ProcessName -like "*$($rule.process)*") { return $rule.category }
         }
     }
-    
-    # Check title rules
+
+    # Title rules (checked for everyone; for browsers these take priority)
     foreach ($rule in $Rules.titleRules) {
-        if ($WindowTitle -like "*$($rule.contains)*") {
-            return $rule.category
-        }
+        if ($WindowTitle -like "*$($rule.contains)*") { return $rule.category }
     }
-    
-    # Default to inconnu
+
+    # Fallback: process rule (catches browsers with no matching title rule)
+    foreach ($rule in $Rules.processRules) {
+        if ($ProcessName -like "*$($rule.process)*") { return $rule.category }
+    }
+
     return "inconnu"
+}
+
+function Get-ChromeTopDomains {
+    param ([int]$Top = 50)
+
+    $histPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+    if (-not (Test-Path $histPath)) { return @() }
+
+    $tmpPath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "afotra_chrome_$(Get-Date -Format 'yyyyMMddHHmmss').db")
+    try {
+        # Copy the file to avoid Chrome's lock
+        [System.IO.File]::Copy($histPath, $tmpPath, $true)
+
+        # SQLite stores text as UTF-8 – extract all URL-like strings from the binary
+        $bytes  = [System.IO.File]::ReadAllBytes($tmpPath)
+        $text   = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+        $pattern = 'https?://([a-zA-Z0-9][a-zA-Z0-9\-]{0,61}(?:\.[a-zA-Z0-9][a-zA-Z0-9\-]{0,61})*\.[a-zA-Z]{2,})'
+        $allMatches = [regex]::Matches($text, $pattern)
+
+        $domains = $allMatches |
+            ForEach-Object { $_.Groups[1].Value.ToLower() } |
+            Where-Object   { $_ -match '\.' -and $_.Length -lt 80 } |
+            Group-Object   |
+            Sort-Object    Count -Descending |
+            Select-Object  -First $Top |
+            ForEach-Object { [PSCustomObject]@{ Domain = $_.Name; Count = $_.Count; Category = "" } }
+
+        return $domains
+    }
+    catch { return @() }
+    finally { Remove-Item $tmpPath -ErrorAction SilentlyContinue }
 }
 
 function Save-Rules {
@@ -105,4 +146,4 @@ function Add-TitleRule {
     $Rules.titleRules += @{ contains = $Contains; category = $Category }
 }
 
-Export-ModuleMember -Function Load-Rules, Get-DefaultRules, Classify-Activity, Save-Rules, Get-Categories, Add-Category, Add-ProcessRule, Add-TitleRule
+Export-ModuleMember -Function Load-Rules, Get-DefaultRules, Classify-Activity, Save-Rules, Get-Categories, Add-Category, Add-ProcessRule, Add-TitleRule, Get-ChromeTopDomains

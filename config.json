@@ -1,5 +1,5 @@
 {
-  "sampleIntervalSeconds": 10,
+  "sampleIntervalSeconds": 5,
   "focusMinPerDay": 480,
   "maxDistractionMinPerDay": 120,
   "logFolder": "logs",
