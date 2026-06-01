@@ -22,6 +22,12 @@ try {
     $rules = Load-Rules -RulesPath $rulesPath
     $logFolder = Join-Path $scriptRoot $config.logFolder
 
+    # Timer event actions run in a separate scope and do NOT capture script-local
+    # variables. Expose what the action needs via $global: so it is reachable from
+    # inside the Elapsed handler (otherwise the tracker silently logs nothing).
+    $global:AfotraRules  = $rules
+    $global:AfotraConfig = $config
+
     if ($Check) {
         $psProcesses = Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*AFOTRA*" }
         if ($psProcesses.Count -gt 0) {
@@ -59,6 +65,7 @@ try {
 
     $logFile = Get-TodayLogFile -LogFolder $logFolder
     Initialize-LogFile -LogFile $logFile
+    $global:AfotraLogFile = $logFile
     Write-Host "Logging to: $logFile" -ForegroundColor Green
 
     $timer = New-Object System.Timers.Timer
@@ -66,12 +73,17 @@ try {
     $timer.AutoReset = $true
 
     $action = {
-        $info = Get-ActiveWindowInfo
-        if ($info) {
-            $category = Classify-Activity -ProcessName $info.ProcessName -WindowTitle $info.WindowTitle -Rules $rules
-            $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
-            Write-ActivityLog -LogFile $logFile -ActivityInfo $info -SampleSeconds $config.sampleIntervalSeconds
-            Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] $($info.ProcessName) > $category" -ForegroundColor Cyan
+        try {
+            $info = Get-ActiveWindowInfo
+            if ($info) {
+                $category = Classify-Activity -ProcessName $info.ProcessName -WindowTitle $info.WindowTitle -Rules $global:AfotraRules
+                $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
+                Write-ActivityLog -LogFile $global:AfotraLogFile -ActivityInfo $info -SampleSeconds $global:AfotraConfig.sampleIntervalSeconds
+                Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] $($info.ProcessName) > $category" -ForegroundColor Cyan
+            }
+        }
+        catch {
+            Write-Host "[tracker] sample error: $_" -ForegroundColor Red
         }
     }
 
