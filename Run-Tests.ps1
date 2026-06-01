@@ -44,10 +44,13 @@ Check "rules.json exists & valid JSON" {
     "$($r.categories.Count) cats, $($r.processRules.Count) proc rules, $($r.titleRules.Count) title rules"
 }
 foreach ($m in @("Tracker.Core","Rules.Core","Report.Core","UI.Core")) {
+    # NB: pas de .GetNewClosure() ici — Check invoque le scriptblock immediatement
+    # (donc $m a deja la bonne valeur), et la fermeture detacherait la portee du
+    # script, rendant la fonction Assert invisible.
     Check "module modules\$m.psm1 present" {
         Assert (Test-Path (Join-Path $root "modules\$m.psm1")) "missing"
         "ok"
-    }.GetNewClosure()
+    }
 }
 
 # --- Group 2: Module loading ---
@@ -151,16 +154,52 @@ Check "Both XAML blocks parse into Windows" {
 
 # --- Group 8: End-to-end live runs ---
 Write-Host "`n[8] End-to-end live process runs" -ForegroundColor Yellow
+# Enumere les fenetres VISIBLES appartenant au processus pour trouver la fenetre
+# WPF. On ne peut pas se fier a Process.MainWindowTitle : l'hote powershell est
+# lance -WindowStyle Hidden, donc sa "fenetre principale" (la console masquee)
+# renvoie un titre vide alors meme que la fenetre WPF existe avec le bon titre.
+if (-not ([System.Management.Automation.PSTypeName]'AfotraWinScan').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class AfotraWinScan {
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr p);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Auto)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    delegate bool EnumProc(IntPtr h, IntPtr p);
+    public static string FindTitle(uint targetPid, string needle) {
+        string found = null;
+        EnumWindows(delegate(IntPtr h, IntPtr p) {
+            if (!IsWindowVisible(h)) return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            if (pid != targetPid) return true;
+            StringBuilder sb = new StringBuilder(512);
+            GetWindowText(h, sb, 512);
+            string t = sb.ToString();
+            if (t.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0) { found = t; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+}
+"@
+}
 Check "dashboard-wpf.ps1 launches & survives startup" {
     $eo = Join-Path $env:TEMP "afotra_dash_err.log"; "" | Set-Content $eo
     $p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$(Join-Path $root 'dashboard-wpf.ps1')`"" -PassThru -RedirectStandardError $eo -RedirectStandardOutput (Join-Path $env:TEMP "afotra_dash_out.log") -WindowStyle Hidden
-    Start-Sleep -Seconds 8
+    $title = $null
+    for ($i = 0; $i -lt 15 -and -not $title; $i++) {
+        Start-Sleep -Seconds 1
+        if (-not (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)) { break }
+        $title = [AfotraWinScan]::FindTitle([uint32]$p.Id, "AFOTRA")
+    }
     $alive = $null -ne (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
-    $title = if ($alive) { (Get-Process -Id $p.Id).MainWindowTitle } else { "" }
     $err = (Get-Content $eo -Raw -ErrorAction SilentlyContinue)
     if ($alive) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     Assert $alive "process died during startup. stderr: $err"
-    Assert ($title -like "*AFOTRA*") "window title not found: '$title'"
+    Assert ($title -like "*AFOTRA*") "no visible AFOTRA window found (title='$title'). stderr: $err"
     "window: '$title'"
 }
 Check "tracker.ps1 actually appends rows when running" {
