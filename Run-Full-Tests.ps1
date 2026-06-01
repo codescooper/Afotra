@@ -188,8 +188,9 @@ Check "Get-ReportData : focus score, total, switches, categories" {
     Assert ($rd.FocusScore -eq 70) "focus=$($rd.FocusScore)"
     Assert ($rd.Categories["travail"] -eq 70) "travail=$($rd.Categories['travail'])"
     Assert ($rd.Categories["distraction"] -eq 30) "distraction=$($rd.Categories['distraction'])"
-    Assert ($rd.ContextSwitches -eq 8) "switches=$($rd.ContextSwitches) (7 titres distincts + 1)"
-    "total=100s focus=70% switches=8" }
+    # 7 transitions : w1..w7 (6 bascules) puis w7->g (1) ; g->g->g = 0.
+    Assert ($rd.ContextSwitches -eq 7) "switches=$($rd.ContextSwitches) (attendu 7 transitions)"
+    "total=100s focus=70% switches=7" }
 Check "Get-ReportData : agrege les 'inconnu' (Unknowns)" {
     $tmp = Join-Path $env:TEMP ("afotra_uk_{0}.csv" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
     Initialize-LogFile -LogFile $tmp
@@ -261,6 +262,7 @@ Check "tracker.ps1 : ecrit reellement des lignes en cours d'execution" {
     Start-Sleep -Seconds 13
     $after = (@(Get-Content $logFile)).Count
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $root "tracker.lock") -ErrorAction SilentlyContinue  # finally non execute apres un kill
     Assert ($after -gt $before) "aucune ligne ajoutee (before=$before after=$after)"
     "ajout de $($after-$before) ligne(s) en 13s" }
 Check "daily-report.ps1 : genere le summary JSON du jour" {
@@ -325,6 +327,72 @@ public class AfotraWinScan {
     Assert $alive "le processus est mort au demarrage. stderr: $err"
     Assert ($title -like "*AFOTRA*") "aucune fenetre AFOTRA visible (title='$title')"
     "fenetre: '$title'" }
+
+# ===================================================================
+Section "G. Ameliorations (AFK / verrou PID / focus configurable)"
+Check "config.json : idleThresholdSeconds + focusCategories presents" {
+    $c = Get-Content (Join-Path $root "config.json") -Encoding UTF8 | ConvertFrom-Json
+    Assert ($c.idleThresholdSeconds -ge 1) "idleThresholdSeconds absent/invalide"
+    Assert ($c.focusCategories.Count -ge 1) "focusCategories absent"
+    "idle=$($c.idleThresholdSeconds)s, focus=[$($c.focusCategories -join ',')]" }
+Check "rules.json : categorie 'inactif' presente" {
+    Assert ($rules.categories -contains "inactif") "categorie inactif manquante"
+    "inactif present" }
+Check "Get-IdleSeconds renvoie un entier >= 0" {
+    $s = Get-IdleSeconds
+    Assert ($s -is [int] -and $s -ge 0) "valeur invalide: $s"
+    "$s s d'inactivite" }
+Check "Get-IsSessionLocked : LockApp -> verrouille, Code -> non" {
+    Assert (Get-IsSessionLocked -ActivityInfo ([PSCustomObject]@{ProcessName="LockApp"})) "LockApp non detecte"
+    Assert (-not (Get-IsSessionLocked -ActivityInfo ([PSCustomObject]@{ProcessName="Code"}))) "Code faux positif"
+    "detection verrou OK" }
+Check "Measure-ContextSwitches : compte les transitions (A,A,B,A -> 2)" {
+    $r = @("A","A","B","A") | ForEach-Object { [PSCustomObject]@{ WindowTitle = $_ } }
+    $n = Measure-ContextSwitches -Rows $r
+    Assert ($n -eq 2) "got $n"
+    "2 transitions" }
+Check "Verrou PID : Set/Test/Remove (PID courant=actif, PID mort=inactif)" {
+    $lock = Join-Path $env:TEMP ("afotra_lock_{0}.lock" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+    Remove-TrackerLock -LockFile $lock
+    Assert (-not (Test-TrackerRunning -LockFile $lock)) "verrou absent devrait etre false"
+    Set-TrackerLock -LockFile $lock -ProcessId $PID
+    Assert (Test-TrackerRunning -LockFile $lock) "PID courant devrait etre actif"
+    Set-TrackerLock -LockFile $lock -ProcessId 999999
+    Assert (-not (Test-TrackerRunning -LockFile $lock)) "PID mort devrait etre inactif"
+    Remove-TrackerLock -LockFile $lock
+    Assert (-not (Test-Path $lock)) "verrou non supprime"
+    "cycle verrou OK" }
+Check "Reporting : focusCategories inclut 'etude'" {
+    $tmp = Join-Path $env:TEMP ("afotra_fc_{0}.csv" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+    Initialize-LogFile -LogFile $tmp
+    1..5 | ForEach-Object { Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="Code";ProcessId=1;WindowTitle="t$_";Category="travail"}) -SampleSeconds 10 }
+    1..5 | ForEach-Object { Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="edge";ProcessId=2;WindowTitle="e$_";Category="etude"}) -SampleSeconds 10 }
+    $rd = Get-ReportData -LogFile $tmp -FocusCategories @("travail","etude")
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Assert ($rd.FocusScore -eq 100) "focus=$($rd.FocusScore) (attendu 100)"
+    "travail+etude = 100% focus" }
+Check "Reporting : 'inactif' exclu du temps actif (focus sur actif)" {
+    $tmp = Join-Path $env:TEMP ("afotra_idle_{0}.csv" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+    Initialize-LogFile -LogFile $tmp
+    1..5 | ForEach-Object { Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="Code";ProcessId=1;WindowTitle="t$_";Category="travail"}) -SampleSeconds 10 }
+    1..5 | ForEach-Object { Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="idle";ProcessId=0;WindowTitle="afk";Category="inactif"}) -SampleSeconds 10 }
+    $rd = Get-ReportData -LogFile $tmp
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Assert ($rd.TotalSeconds -eq 100) "total=$($rd.TotalSeconds)"
+    Assert ($rd.ActiveSeconds -eq 50) "actif=$($rd.ActiveSeconds) (attendu 50)"
+    Assert ($rd.FocusScore -eq 100) "focus=$($rd.FocusScore) (attendu 100 sur temps actif)"
+    "total=100s actif=50s focus=100%" }
+Check "tracker.ps1 -Check : exit 0 quand lance (via verrou PID)" {
+    $lock = Join-Path $root "tracker.lock"
+    Remove-Item $lock -ErrorAction SilentlyContinue   # ecarte un verrou orphelin
+    $p = Start-Process powershell -ArgumentList '-NoProfile','-File',"`"$(Join-Path $root 'tracker.ps1')`"" -PassThru -RedirectStandardError (Join-Path $env:TEMP "afotra_lk_err.log") -RedirectStandardOutput (Join-Path $env:TEMP "afotra_lk_out.log") -WindowStyle Hidden
+    # Attendre que le verrou contienne un PID VIVANT (pas seulement que le fichier existe).
+    for ($i = 0; $i -lt 15 -and -not (Test-TrackerRunning -LockFile $lock); $i++) { Start-Sleep -Seconds 1 }
+    $chk = Start-Process powershell -ArgumentList '-NoProfile','-File',"`"$(Join-Path $root 'tracker.ps1')`"",'-Check' -PassThru -Wait -WindowStyle Hidden
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item $lock -ErrorAction SilentlyContinue
+    Assert ($chk.ExitCode -eq 0) "exit=$($chk.ExitCode) (attendu 0 quand lance)"
+    "exit=0 (verrou detecte)" }
 
 # ===================================================================
 # Rapport

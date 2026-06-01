@@ -26,7 +26,8 @@ try {
         exit 1
     }
 
-    $reportData = Get-ReportData -LogFile $logFile
+    $focusCats = if ($config.focusCategories) { $config.focusCategories } else { @("travail") }
+    $reportData = Get-ReportData -LogFile $logFile -FocusCategories $focusCats
 
     if (!$reportData) {
         Write-Host "Unable to process tracking data" -ForegroundColor Red

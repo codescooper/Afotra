@@ -1,8 +1,8 @@
 ﻿# AFOTRA - Rapport de tests complet
 
-- **Date** : 2026-06-01 17:55:43
+- **Date** : 2026-06-01 23:33:48
 - **Machine** : DESKTOP-7K20H38 / utilisateur USER
-- **Resultat** : **TOUS LES TESTS PASSENT** (35/35)
+- **Resultat** : **TOUS LES TESTS PASSENT** (44/44)
 - **Couverture** : configuration, classification (categories + priorites + casse), gestion des regles (round-trip), journalisation, reporting (+ cas limites), bout-en-bout (CLI, tracker live, daily-report, dashboard WPF, XAML)
 
 
@@ -11,7 +11,7 @@
 | Statut | Cas d'usage | Detail |
 |:------:|-------------|--------|
 | PASS | config.json valide et coherent | interval=5s, focus=480min |
-| PASS | rules.json : categories + regles presentes | 5 cats / 38 proc / 98 titre |
+| PASS | rules.json : categories + regles presentes | 6 cats / 38 proc / 98 titre |
 | PASS | toutes les regles referencent une categorie connue | 0 categorie orpheline |
 
 ## B. Classification - categories
@@ -41,7 +41,7 @@
 
 | Statut | Cas d'usage | Detail |
 |:------:|-------------|--------|
-| PASS | Get-Categories renvoie la liste | 5 categories |
+| PASS | Get-Categories renvoie la liste | 6 categories |
 | PASS | Add-Category : nouvelle=true, doublon=false | ajout=True, doublon=False |
 | PASS | Add-ProcessRule / Add-TitleRule augmentent les compteurs | proc 38->39, title 98->99 |
 | PASS | Save-Rules + Load-Rules : persistance fidele | round-trip OK + regle active |
@@ -58,7 +58,7 @@
 
 | Statut | Cas d'usage | Detail |
 |:------:|-------------|--------|
-| PASS | Get-ReportData : focus score, total, switches, categories | total=100s focus=70% switches=8 |
+| PASS | Get-ReportData : focus score, total, switches, categories | total=100s focus=70% switches=7 |
 | PASS | Get-ReportData : agrege les 'inconnu' (Unknowns) | inconnu agrege: 4 occ / 20s |
 | PASS | Get-ReportData : fichier inexistant -> null | null OK |
 | PASS | Get-ReportData : fichier vide (entete seule) -> null | null OK |
@@ -72,11 +72,25 @@
 |:------:|-------------|--------|
 | PASS | tracker.ps1 -Check : exit 1 quand non lance | exit=1 (correct : aucun tracker actif) |
 | PASS | tracker.ps1 : ecrit reellement des lignes en cours d'execution | ajout de 1 ligne(s) en 13s |
-| PASS | daily-report.ps1 : genere le summary JSON du jour | rapport genere (focus=97.87%) |
+| PASS | daily-report.ps1 : genere le summary JSON du jour | rapport genere (focus=98.41%) |
 | PASS | dashboard-wpf.ps1 : XAML (fenetre principale + overlay) parse | 2/2 fenetres XAML valides |
 | PASS | dashboard-wpf.ps1 : se lance et affiche sa fenetre WPF | fenetre: 'AFOTRA Live' |
 
+## G. Ameliorations (AFK / verrou PID / focus configurable)
+
+| Statut | Cas d'usage | Detail |
+|:------:|-------------|--------|
+| PASS | config.json : idleThresholdSeconds + focusCategories presents | idle=180s, focus=[travail] |
+| PASS | rules.json : categorie 'inactif' presente | inactif present |
+| PASS | Get-IdleSeconds renvoie un entier >= 0 | 16 s d'inactivite |
+| PASS | Get-IsSessionLocked : LockApp -> verrouille, Code -> non | detection verrou OK |
+| PASS | Measure-ContextSwitches : compte les transitions (A,A,B,A -> 2) | 2 transitions |
+| PASS | Verrou PID : Set/Test/Remove (PID courant=actif, PID mort=inactif) | cycle verrou OK |
+| PASS | Reporting : focusCategories inclut 'etude' | travail+etude = 100% focus |
+| PASS | Reporting : 'inactif' exclu du temps actif (focus sur actif) | total=100s actif=50s focus=100% |
+| PASS | tracker.ps1 -Check : exit 0 quand lance (via verrou PID) | exit=0 (verrou detecte) |
+
 ---
 
-**Total : 35/35 reussis.** Genere par `Run-Full-Tests.ps1`.
+**Total : 44/44 reussis.** Genere par `Run-Full-Tests.ps1`.
 

@@ -2,9 +2,24 @@
 # Author: CodeScooper
 # Project: AFOTRA - Awema Focus Tracker
 
+function Measure-ContextSwitches {
+    # Compte les VRAIES bascules : nombre de fois ou la fenetre active change
+    # entre deux echantillons consecutifs (et non le nombre de titres distincts).
+    param (
+        [object[]]$Rows
+    )
+    if (-not $Rows -or $Rows.Count -lt 2) { return 0 }
+    $switches = 0
+    for ($i = 1; $i -lt $Rows.Count; $i++) {
+        if ($Rows[$i].WindowTitle -ne $Rows[$i - 1].WindowTitle) { $switches++ }
+    }
+    return $switches
+}
+
 function Get-ReportData {
     param (
-        [string]$LogFile
+        [string]$LogFile,
+        [string[]]$FocusCategories = @("travail")
     )
     
     if (!(Test-Path $LogFile)) {
@@ -51,17 +66,26 @@ function Get-ReportData {
             }
         }
 
-        $focusSeconds = if ($categories["travail"]) { $categories["travail"] } else { 0 }
-        $focusScore = if ($totalSeconds -gt 0) { [math]::Round(($focusSeconds / $totalSeconds) * 100, 2) } else { 0 }
+        # Focus = somme des categories declarees "focus" (configurable).
+        $focusSeconds = 0
+        foreach ($fc in $FocusCategories) { if ($categories[$fc]) { $focusSeconds += $categories[$fc] } }
 
-        $contextSwitches = ($data | Group-Object WindowTitle).Count
+        # Le temps inactif (AFK / ecran verrouille) est exclu du denominateur :
+        # le focus score mesure la concentration pendant le temps ACTIF.
+        $inactiveSeconds = if ($categories["inactif"]) { $categories["inactif"] } else { 0 }
+        $activeSeconds = $totalSeconds - $inactiveSeconds
+        $focusScore = if ($activeSeconds -gt 0) { [math]::Round(($focusSeconds / $activeSeconds) * 100, 2) } else { 0 }
+
+        $contextSwitches = Measure-ContextSwitches -Rows $data
 
         return @{
             TotalSeconds = $totalSeconds
+            ActiveSeconds = $activeSeconds
             SampleSeconds = $sampleSeconds
             Categories = $categories
             Processes = $processes
             Unknowns = $unknowns
+            FocusSeconds = $focusSeconds
             FocusScore = $focusScore
             ContextSwitches = $contextSwitches
             DataRows = $data
@@ -84,8 +108,9 @@ function Export-ReportToJSON {
         New-Item -ItemType Directory -Path $folder -Force | Out-Null
     }
 
-    $focusSeconds = if ($ReportData.Categories["travail"]) { $ReportData.Categories["travail"] } else { 0 }
+    $focusSeconds = if ($null -ne $ReportData.FocusSeconds) { $ReportData.FocusSeconds } elseif ($ReportData.Categories["travail"]) { $ReportData.Categories["travail"] } else { 0 }
     $distractionSeconds = if ($ReportData.Categories["distraction"]) { $ReportData.Categories["distraction"] } else { 0 }
+    $activeSeconds = if ($null -ne $ReportData.ActiveSeconds) { $ReportData.ActiveSeconds } else { $ReportData.TotalSeconds }
 
     $topProcesses = @{}
     $ReportData.Processes.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5 | ForEach-Object {
@@ -94,6 +119,7 @@ function Export-ReportToJSON {
     
     $summary = @{
         TotalTrackedMinutes = [math]::Round($ReportData.TotalSeconds / 60, 2)
+        ActiveMinutes = [math]::Round($activeSeconds / 60, 2)
         FocusMinutes = [math]::Round($focusSeconds / 60, 2)
         DistractionMinutes = [math]::Round($distractionSeconds / 60, 2)
         FocusScore = $ReportData.FocusScore
@@ -121,4 +147,4 @@ function Get-UnknownActivities {
     }
 }
 
-Export-ModuleMember -Function Get-ReportData, Export-ReportToJSON, Get-UnknownActivities
+Export-ModuleMember -Function Get-ReportData, Export-ReportToJSON, Get-UnknownActivities, Measure-ContextSwitches

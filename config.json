@@ -4,5 +4,7 @@
   "maxDistractionMinPerDay": 120,
   "logFolder": "logs",
   "userName": "",
-  "machineName": ""
+  "machineName": "",
+  "idleThresholdSeconds": 180,
+  "focusCategories": ["travail"]
 }

@@ -17,6 +17,12 @@ Both exit 0 on success, 1 on any failure. Invoke directly (see gotchas).
 - `.\daily-report.ps1` — generate today's JSON report
 - `.\dashboard-wpf.ps1` — WPF dashboard
 
+## Behaviour notes
+
+- `config.json` keys: `idleThresholdSeconds` (AFK threshold; idle/locked samples logged as `inactif`), `focusCategories` (categories counted as focus, default `["travail"]`).
+- Focus score = focus / **active** time (total − `inactif`). The `inactif` category is excluded from the denominator.
+- `tracker.ps1` writes a PID file `tracker.lock` (gitignored); `-Check`/`-Stop` rely on it, not on window titles. Force-killing the process leaves a stale lock (its dead PID makes `Test-TrackerRunning` return false, so it's harmless).
+
 ## Gotchas (PowerShell 5.1 / this environment)
 
 - Don't use `-ExecutionPolicy Bypass` — blocked by the permission classifier. Run scripts directly (`.\script.ps1`).
