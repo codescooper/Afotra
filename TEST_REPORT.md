@@ -1,6 +1,6 @@
 ﻿# AFOTRA - Rapport de tests complet
 
-- **Date** : 2026-06-01 23:33:48
+- **Date** : 2026-06-01 23:57:39
 - **Machine** : DESKTOP-7K20H38 / utilisateur USER
 - **Resultat** : **TOUS LES TESTS PASSENT** (44/44)
 - **Couverture** : configuration, classification (categories + priorites + casse), gestion des regles (round-trip), journalisation, reporting (+ cas limites), bout-en-bout (CLI, tracker live, daily-report, dashboard WPF, XAML)
@@ -72,7 +72,7 @@
 |:------:|-------------|--------|
 | PASS | tracker.ps1 -Check : exit 1 quand non lance | exit=1 (correct : aucun tracker actif) |
 | PASS | tracker.ps1 : ecrit reellement des lignes en cours d'execution | ajout de 1 ligne(s) en 13s |
-| PASS | daily-report.ps1 : genere le summary JSON du jour | rapport genere (focus=98.41%) |
+| PASS | daily-report.ps1 : genere le summary JSON du jour | rapport genere (focus=98.44%) |
 | PASS | dashboard-wpf.ps1 : XAML (fenetre principale + overlay) parse | 2/2 fenetres XAML valides |
 | PASS | dashboard-wpf.ps1 : se lance et affiche sa fenetre WPF | fenetre: 'AFOTRA Live' |
 
@@ -82,7 +82,7 @@
 |:------:|-------------|--------|
 | PASS | config.json : idleThresholdSeconds + focusCategories presents | idle=180s, focus=[travail] |
 | PASS | rules.json : categorie 'inactif' presente | inactif present |
-| PASS | Get-IdleSeconds renvoie un entier >= 0 | 16 s d'inactivite |
+| PASS | Get-IdleSeconds renvoie un entier >= 0 | 362 s d'inactivite |
 | PASS | Get-IsSessionLocked : LockApp -> verrouille, Code -> non | detection verrou OK |
 | PASS | Measure-ContextSwitches : compte les transitions (A,A,B,A -> 2) | 2 transitions |
 | PASS | Verrou PID : Set/Test/Remove (PID courant=actif, PID mort=inactif) | cycle verrou OK |

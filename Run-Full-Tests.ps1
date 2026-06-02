@@ -8,6 +8,9 @@
 #
 # Produit un rapport Markdown : TEST_REPORT.md
 # Exit code 0 = tout vert, 1 = au moins un echec.
+# -SkipLive : saute les tests necessitant un bureau interactif (CI headless).
+
+param([switch]$SkipLive)
 
 $ErrorActionPreference = "Stop"
 $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -16,6 +19,13 @@ $script:Results = @()
 $script:Group   = ""
 
 function Assert($cond, $msg) { if (-not $cond) { throw $msg } }
+
+# Marque un test comme saute (affiche, jamais silencieux ; ne compte pas en echec).
+function Skip {
+    param([string]$Name, [string]$Reason)
+    $script:Results += [PSCustomObject]@{ Group=$script:Group; Status="SKIP"; Name=$Name; Detail=$Reason }
+    Write-Host ("  [SKIP] {0,-52} {1}" -f $Name, $Reason) -ForegroundColor DarkYellow
+}
 
 function Check {
     param([string]$Name, [scriptblock]$Test)
@@ -255,6 +265,10 @@ Check "tracker.ps1 -Check : exit 1 quand non lance" {
     $p = Start-Process powershell -ArgumentList '-NoProfile','-File',"`"$(Join-Path $root 'tracker.ps1')`"",'-Check' -PassThru -Wait -WindowStyle Hidden
     Assert ($p.ExitCode -eq 1) "exit code=$($p.ExitCode) (attendu 1)"
     "exit=1 (correct : aucun tracker actif)" }
+if ($SkipLive) {
+    Skip "tracker.ps1 : ecrit reellement des lignes en cours d'execution" "requiert un bureau interactif (fenetre active)"
+    Skip "daily-report.ps1 : genere le summary JSON du jour" "depend de donnees live du jour (saute avec tracker live)"
+} else {
 Check "tracker.ps1 : ecrit reellement des lignes en cours d'execution" {
     $logFile = Join-Path $root ("logs\activity-{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd'))
     $before = if (Test-Path $logFile) { (@(Get-Content $logFile)).Count } else { 0 }
@@ -273,6 +287,7 @@ Check "daily-report.ps1 : genere le summary JSON du jour" {
     $obj = Get-Content $json -Raw | ConvertFrom-Json
     Assert ($null -ne $obj.FocusScore) "FocusScore absent du rapport"
     "rapport genere (focus=$($obj.FocusScore)%)" }
+}
 Check "dashboard-wpf.ps1 : XAML (fenetre principale + overlay) parse" {
     Add-Type -AssemblyName PresentationFramework
     $src = Get-Content (Join-Path $root "dashboard-wpf.ps1") -Raw
@@ -287,6 +302,7 @@ Check "dashboard-wpf.ps1 : XAML (fenetre principale + overlay) parse" {
     }
     Assert ($n -eq 2) "seulement $n/2 fenetres"
     "$n/2 fenetres XAML valides" }
+if ($SkipLive) { Skip "dashboard-wpf.ps1 : se lance et affiche sa fenetre WPF" "requiert un bureau interactif (fenetre WPF)" } else {
 Check "dashboard-wpf.ps1 : se lance et affiche sa fenetre WPF" {
     if (-not ([System.Management.Automation.PSTypeName]'AfotraWinScan').Type) {
         Add-Type -TypeDefinition @"
@@ -327,6 +343,7 @@ public class AfotraWinScan {
     Assert $alive "le processus est mort au demarrage. stderr: $err"
     Assert ($title -like "*AFOTRA*") "aucune fenetre AFOTRA visible (title='$title')"
     "fenetre: '$title'" }
+}
 
 # ===================================================================
 Section "G. Ameliorations (AFK / verrou PID / focus configurable)"
@@ -382,6 +399,7 @@ Check "Reporting : 'inactif' exclu du temps actif (focus sur actif)" {
     Assert ($rd.ActiveSeconds -eq 50) "actif=$($rd.ActiveSeconds) (attendu 50)"
     Assert ($rd.FocusScore -eq 100) "focus=$($rd.FocusScore) (attendu 100 sur temps actif)"
     "total=100s actif=50s focus=100%" }
+if ($SkipLive) { Skip "tracker.ps1 -Check : exit 0 quand lance (via verrou PID)" "demarre un process tracker live" } else {
 Check "tracker.ps1 -Check : exit 0 quand lance (via verrou PID)" {
     $lock = Join-Path $root "tracker.lock"
     Remove-Item $lock -ErrorAction SilentlyContinue   # ecarte un verrou orphelin
@@ -393,21 +411,25 @@ Check "tracker.ps1 -Check : exit 0 quand lance (via verrou PID)" {
     Remove-Item $lock -ErrorAction SilentlyContinue
     Assert ($chk.ExitCode -eq 0) "exit=$($chk.ExitCode) (attendu 0 quand lance)"
     "exit=0 (verrou detecte)" }
+}
 
 # ===================================================================
 # Rapport
 # ===================================================================
 $pass = @($script:Results | Where-Object Status -eq "PASS").Count
 $fail = @($script:Results | Where-Object Status -eq "FAIL").Count
+$skip = @($script:Results | Where-Object Status -eq "SKIP").Count
 $total = $pass + $fail
 
 Write-Host "`n=== RESUME ===" -ForegroundColor Cyan
 Write-Host ("Reussis: {0}/{1}" -f $pass, $total) -ForegroundColor Green
+if ($skip -gt 0) { Write-Host ("Sautes: {0} (live/bureau)" -f $skip) -ForegroundColor DarkYellow }
 if ($fail -gt 0) { Write-Host ("Echecs: {0}/{1}" -f $fail, $total) -ForegroundColor Red }
 
 # --- Genere TEST_REPORT.md ---
 $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$verdict = if ($fail -eq 0) { "TOUS LES TESTS PASSENT" } else { "$fail ECHEC(S)" }
+$skipNote = if ($skip -gt 0) { " ($skip sautes : live/bureau)" } else { "" }
+$verdict = if ($fail -eq 0) { "TOUS LES TESTS PASSENT$skipNote" } else { "$fail ECHEC(S)" }
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("# AFOTRA - Rapport de tests complet")
 [void]$sb.AppendLine("")
@@ -426,7 +448,7 @@ foreach ($r in $script:Results) {
         [void]$sb.AppendLine("|:------:|-------------|--------|")
         $lastGroup = $r.Group
     }
-    $icon = if ($r.Status -eq "PASS") { "PASS" } else { "FAIL" }
+    $icon = switch ($r.Status) { "PASS" { "PASS" } "SKIP" { "SKIP" } default { "FAIL" } }
     $d = ($r.Detail -replace '\|','\|' -replace '[\r\n]+',' ')
     [void]$sb.AppendLine("| $icon | $($r.Name) | $d |")
 }

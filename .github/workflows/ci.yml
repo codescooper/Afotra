@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (Windows PowerShell)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Runners GitHub = headless : on saute (-SkipLive) les tests qui exigent un
+      # bureau interactif (capture de fenetre active, dashboard WPF, journalisation
+      # live). Toute la logique (config, classification, regles, journalisation,
+      # reporting, idle/verrou, XAML) tourne, elle, sans affichage.
+      - name: Run core suite (Run-Tests.ps1)
+        shell: powershell
+        run: .\Run-Tests.ps1 -SkipLive
+
+      - name: Run full suite (Run-Full-Tests.ps1)
+        shell: powershell
+        run: .\Run-Full-Tests.ps1 -SkipLive
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: TEST_REPORT.md

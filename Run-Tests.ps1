@@ -2,13 +2,17 @@
 # Author: CodeScooper | Verifies the project is concretely functional.
 #
 # Usage:   powershell -NoProfile -ExecutionPolicy Bypass -File .\Run-Tests.ps1
+#          add -SkipLive on headless CI to skip tests needing an interactive desktop.
 # Exit code 0 = all tests passed, 1 = at least one failure.
+
+param([switch]$SkipLive)
 
 $ErrorActionPreference = "Stop"
 $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 
 $script:Pass = 0
 $script:Fail = 0
+$script:Skip = 0
 $script:Results = @()
 
 function Check {
@@ -27,6 +31,15 @@ function Check {
 }
 
 function Assert($cond, $msg) { if (-not $cond) { throw $msg } }
+
+# Marque un test comme saute (ex. sur CI headless) sans le compter en echec,
+# mais en l'affichant explicitement (pas de saut silencieux).
+function Skip {
+    param([string]$Name, [string]$Reason)
+    $script:Skip++
+    $script:Results += [PSCustomObject]@{ Status = "SKIP"; Name = $Name; Detail = $Reason }
+    Write-Host ("  [SKIP] {0,-45} {1}" -f $Name, $Reason) -ForegroundColor DarkYellow
+}
 
 Write-Host "`n=== AFOTRA Automated Verification Suite ===" -ForegroundColor Cyan
 Write-Host "Root: $root`n" -ForegroundColor DarkGray
@@ -87,10 +100,14 @@ Check "Unmatched -> inconnu" {
 
 # --- Group 4: Live window capture ---
 Write-Host "`n[4] Live window capture (Win32)" -ForegroundColor Yellow
-Check "Get-ActiveWindowInfo returns a process" {
-    $i = Get-ActiveWindowInfo
-    Assert ($i -and $i.ProcessName) "no info returned"
-    "$($i.ProcessName) (pid $($i.ProcessId))"
+if ($SkipLive) {
+    Skip "Get-ActiveWindowInfo returns a process" "requires interactive desktop (foreground window)"
+} else {
+    Check "Get-ActiveWindowInfo returns a process" {
+        $i = Get-ActiveWindowInfo
+        Assert ($i -and $i.ProcessName) "no info returned"
+        "$($i.ProcessName) (pid $($i.ProcessId))"
+    }
 }
 
 # --- Group 5: Logging roundtrip ---
@@ -186,6 +203,10 @@ public class AfotraWinScan {
 }
 "@
 }
+if ($SkipLive) {
+    Skip "dashboard-wpf.ps1 launches & survives startup" "requires interactive desktop (WPF window)"
+    Skip "tracker.ps1 actually appends rows when running" "requires interactive desktop (foreground window)"
+} else {
 Check "dashboard-wpf.ps1 launches & survives startup" {
     $eo = Join-Path $env:TEMP "afotra_dash_err.log"; "" | Set-Content $eo
     $p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$(Join-Path $root 'dashboard-wpf.ps1')`"" -PassThru -RedirectStandardError $eo -RedirectStandardOutput (Join-Path $env:TEMP "afotra_dash_out.log") -WindowStyle Hidden
@@ -209,14 +230,17 @@ Check "tracker.ps1 actually appends rows when running" {
     Start-Sleep -Seconds 13
     $after = (@(Get-Content $logFile)).Count
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $root "tracker.lock") -ErrorAction SilentlyContinue
     Assert ($after -gt $before) "no rows appended (before=$before after=$after) - tracker is a no-op"
     "appended $($after-$before) row(s) in 13s"
+}
 }
 
 # --- Summary ---
 Write-Host "`n=== SUMMARY ===" -ForegroundColor Cyan
 $total = $script:Pass + $script:Fail
 Write-Host ("Passed: {0}/{1}" -f $script:Pass, $total) -ForegroundColor Green
+if ($script:Skip -gt 0) { Write-Host ("Skipped: {0} (live/desktop)" -f $script:Skip) -ForegroundColor DarkYellow }
 if ($script:Fail -gt 0) {
     Write-Host ("Failed: {0}/{1}" -f $script:Fail, $total) -ForegroundColor Red
     exit 1

@@ -11,6 +11,8 @@ reports to `logs/reports/summary-<date>.json`.
 
 Both exit 0 on success, 1 on any failure. Invoke directly (see gotchas).
 
+Add `-SkipLive` to skip tests needing an interactive desktop (foreground capture, WPF window, live logging). GitHub Actions CI (`.github/workflows/ci.yml`) runs both suites with `-SkipLive` on a `windows-latest` runner.
+
 ## Running the app
 
 - `.\tracker.ps1` / `-Check` / `-Stop` — standalone tracker (CLI)
