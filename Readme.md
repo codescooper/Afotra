@@ -1,5 +1,8 @@
 # AFOTRA - Awema Focus Tracker
 
+[![CI](https://github.com/codescooper/Afotra/actions/workflows/ci.yml/badge.svg)](https://github.com/codescooper/Afotra/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Version:** 1.0  
 **Author/Maintainer:** CodeScooper  
 **License:** MIT  
@@ -382,5 +385,5 @@ For more information or to contribute: [GitHub](https://github.com/CodeScooper/A
 ## Auteur
 Maintained by CodeScooper.
 
-## Auteur
-Maintained by CodeScooper.
+## License
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
