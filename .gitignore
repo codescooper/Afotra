@@ -1,2 +1,4 @@
 logs/
 tracker.lock
+.claude/
+.vscode/
