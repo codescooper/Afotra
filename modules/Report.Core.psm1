@@ -100,7 +100,8 @@ function Get-ReportData {
 function Export-ReportToJSON {
     param (
         [object]$ReportData,
-        [string]$OutputFile
+        [string]$OutputFile,
+        [object]$TaskSummary = $null
     )
     
     $folder = Split-Path -Parent $OutputFile
@@ -126,6 +127,11 @@ function Export-ReportToJSON {
         ContextSwitches = $ReportData.ContextSwitches
         Categories = $ReportData.Categories
         TopProcesses = $topProcesses
+    }
+
+    # Optional Tasks section (counts: a faire / en cours / terminees aujourd'hui / en retard)
+    if ($null -ne $TaskSummary) {
+        $summary["Tasks"] = $TaskSummary
     }
 
     $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $OutputFile -Encoding UTF8 -Force

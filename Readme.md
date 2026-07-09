@@ -334,6 +334,98 @@ A: Yes, AFOTRA will track the window active in your RDP connection.
 
 ---
 
+## Tasks (Tâches)
+
+AFOTRA includes an integrated task manager, reachable from the **Tâches** tab.
+
+### Manage tasks
+- **Ajouter / Éditer**: opens a form covering every field (titre, description, catégorie,
+  projet, contact, priorité, statut, échéance, rappel du soir, bloquée par, notes).
+- **Terminer**: marks the task done (records the completion time). **Archiver**: hides it
+  from the active list.
+- **Filters & search**: quick filters (À faire, En cours, Dues aujourd'hui, En retard) and a
+  text search box. Rows are colour-coded — **red** = overdue, **orange** = due today,
+  **gray** = done/archived.
+
+### Where tasks are stored
+`tasks.json` at the project root — a plain JSON array, written atomically to avoid
+corruption. It stays on your machine (gitignored) because it can contain personal contacts.
+On first launch the app seeds a starter set; run `.\seed-tasks.ps1` to (re)create it.
+
+### Evening reminders
+Tasks with a **Rappel du soir** trigger a Windows notification that evening, and again each
+evening until the task is done. If the [BurntToast](https://github.com/Windos/BurntToast)
+module is installed (`Install-Module BurntToast -Scope CurrentUser`) you get native toasts;
+otherwise AFOTRA falls back to a system-tray balloon (no extra dependency).
+
+To get reminders **even when the dashboard is closed**, schedule the silent notifier at 20:00:
+
+```powershell
+schtasks /Create /SC DAILY /ST 20:00 /TN "AFOTRA Rappel du soir" /F `
+  /TR "powershell -NoProfile -WindowStyle Hidden -File \"C:\path\to\Afotra\afotra-notify.ps1\""
+```
+
+(Replace the path with your install folder. Remove with
+`schtasks /Delete /TN "AFOTRA Rappel du soir" /F`.)
+
+### In reports
+Daily reports (`daily-report.ps1` or the **Generate Report** button) include a `Tasks`
+section — counts of à faire / en cours / terminées aujourd'hui / en retard, plus minutes
+worked today and how many tasks ran over their estimate — and the Dashboard tab shows the
+main figures in a card.
+
+### Work sessions (Pomodoro)
+
+Select a task, set an **estimate** (minutes), and hit **Démarrer** to start a timed session
+from the **Tâches** tab:
+
+- The big timer **counts down** from your estimate, then turns **red** and counts the
+  **overrun** — that overrun is your efficiency signal.
+- **Pause / Reprendre** at will, and take **Pomodoro breaks** (suggested automatically after
+  each work interval — 25/5, long break every 4 by default). Two clocks are recorded: *work*
+  time (excludes pauses) and *global* time (wall-clock), so you can see the breaks you took.
+- **Terminer la tâche** ends the session **and** marks the task done; **Arrêter** just saves
+  the time. The running timer is also shown in the floating **overlay** so you can keep it in
+  view while working in other apps.
+- Time is saved onto the task (`Estimé` and `Passé` columns), and daily reports summarise the
+  minutes worked and the number of tasks over budget.
+
+Pomodoro cadence is configurable in `config.json`:
+
+```json
+"pomodoro": { "workMinutes": 25, "shortBreakMinutes": 5, "longBreakMinutes": 15, "longBreakEvery": 4, "autoStartNext": false }
+```
+
+### The assistant orb
+
+The floating overlay is a **living sphere** that represents the assistant and tells you your
+state **at a glance** — no need to read anything:
+
+- **Colour & motion** = mood: calm **teal** when idle, gentle **emerald** while focused, slow
+  **violet** on a break/pause, faster **amber-red** when you're over your estimate.
+- **Hover the sphere** to reveal the full panel (current app, category, session timer, focus score).
+- **Drag** it anywhere; it stays on top and out of the way — until it needs you.
+
+**Focus guard.** While a session is running, if you switch to an app that isn't part of the
+task, the sphere **grows, reddens and moves into your way**, and asks *"is this related to the
+task?"*:
+
+- **Oui** — the app joins the task's tool list and the sphere calms down (it won't ask again for it).
+- **Non** — it nudges you to refocus and keeps the pressure on if you linger.
+- **Ignorer** — snooze it for the rest of the session.
+
+This way the assistant quietly builds the **list of what each task needs** and pushes back on
+everything else, so you re-center the moment you drift. It never closes or blocks your windows —
+the pressure is purely visual (a sound alarm is optional).
+
+Configurable in `config.json`:
+
+```json
+"assistant": { "orbEnabled": true, "focusGuard": true, "guardSound": false, "orbMinSize": 90, "orbMaxSize": 420 }
+```
+
+---
+
 ## Limitations
 
 ### Version 1.0

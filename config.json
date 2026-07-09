@@ -6,5 +6,20 @@
   "userName": "",
   "machineName": "",
   "idleThresholdSeconds": 180,
-  "focusCategories": ["travail"]
+  "focusCategories": ["travail"],
+  "pomodoro": {
+    "workMinutes": 25,
+    "shortBreakMinutes": 5,
+    "longBreakMinutes": 15,
+    "longBreakEvery": 4,
+    "autoStartNext": false,
+    "sound": true
+  },
+  "assistant": {
+    "orbEnabled": true,
+    "focusGuard": true,
+    "guardSound": false,
+    "orbMinSize": 90,
+    "orbMaxSize": 420
+  }
 }

@@ -56,7 +56,7 @@ Check "rules.json exists & valid JSON" {
     Assert ($r.categories.Count -gt 0) "no categories"
     "$($r.categories.Count) cats, $($r.processRules.Count) proc rules, $($r.titleRules.Count) title rules"
 }
-foreach ($m in @("Tracker.Core","Rules.Core","Report.Core","UI.Core")) {
+foreach ($m in @("Tracker.Core","Rules.Core","Report.Core","UI.Core","Tasks.Core","Notify.Core","Session.Core","Orb.Core")) {
     # NB: pas de .GetNewClosure() ici — Check invoque le scriptblock immediatement
     # (donc $m a deja la bonne valeur), et la fermeture detacherait la portee du
     # script, rendant la fonction Assert invisible.
@@ -234,6 +234,50 @@ Check "tracker.ps1 actually appends rows when running" {
     Assert ($after -gt $before) "no rows appended (before=$before after=$after) - tracker is a no-op"
     "appended $($after-$before) row(s) in 13s"
 }
+}
+
+# --- Group 9: Tasks module ---
+Write-Host "`n[9] Tasks module" -ForegroundColor Yellow
+Check "Import Tasks.Core + Notify.Core" {
+    Import-Module (Join-Path $root "modules\Tasks.Core.psm1") -Force -DisableNameChecking
+    Import-Module (Join-Path $root "modules\Notify.Core.psm1") -Force -DisableNameChecking
+    foreach ($fn in @("New-Task","Get-Tasks","Save-Tasks","Get-DueReminders","Get-TaskSummary","Initialize-TaskSeed","Show-AfotraNotification")) {
+        Assert (Get-Command $fn -ErrorAction SilentlyContinue) "missing $fn"
+    }
+    "7 key functions available"
+}
+Check "New-Task defaults + atomic save/load round-trip" {
+    $store = Join-Path $env:TEMP ("afotra_core_" + [guid]::NewGuid().ToString('N') + ".json")
+    $t = New-Task -Titre "Roundtrip" -Categorie "Appels" -Priorite Haute
+    Assert ([guid]::TryParse($t.Id, [ref]([guid]::Empty))) "Id not a GUID"
+    Assert ($t.Statut -eq "A_faire") "default statut wrong"
+    Save-Tasks -Tasks @($t) -Path $store
+    $back = @(Get-Tasks -Path $store)
+    Remove-Item "$store*" -ErrorAction SilentlyContinue
+    Assert ($back.Count -eq 1) "count=$($back.Count)"
+    Assert ($back[0].Priorite -eq "Haute") "priorite lost"
+    "GUID + defaults + round-trip OK"
+}
+Check "Session.Core : cycle minimal (travail vs global)" {
+    Import-Module (Join-Path $root "modules\Session.Core.psm1") -Force -DisableNameChecking
+    $t0 = [datetime]"2026-07-08T10:00:00"
+    $s = Start-Session -TaskId "x" -EstimateSec 60 -Config @{workMinutes=25} -Now $t0
+    Suspend-Session -State $s -Now $t0.AddSeconds(20) | Out-Null
+    Resume-Session  -State $s -Now $t0.AddSeconds(50) | Out-Null
+    $res = Get-SessionResult -State $s -Now $t0.AddSeconds(80)
+    Assert ($res.TravailSecondes -eq 50) "travail=$($res.TravailSecondes) (attendu 50)"
+    Assert ($res.GlobalSecondes -eq 80) "global=$($res.GlobalSecondes) (attendu 80)"
+    Assert ($res.PauseSecondes -eq 30) "pause=$($res.PauseSecondes) (attendu 30)"
+    "travail=50 global=80 pause=30"
+}
+Check "Orb.Core : mapping humeur + garde" {
+    Import-Module (Join-Path $root "modules\Orb.Core.psm1") -Force -DisableNameChecking
+    Assert ((Get-OrbMood -HasSession $false) -eq 'Idle') "no session -> Idle"
+    Assert ((Get-OrbMood -HasSession $true -Mode Running -Guard $true) -eq 'Ask') "garde -> Ask"
+    $ask = Get-OrbVisual Ask 1.0; $idle = Get-OrbVisual Idle
+    Assert ($ask.SizePx -gt $idle.SizePx -and $ask.MoveToCenter) "Ask plus gros + recentre"
+    Assert (-not (Test-ProcessAllowed -ProcessName 'chrome' -AllowList @('code'))) "chrome non liste"
+    "Idle/Ask + tailles + allow-list OK"
 }
 
 # --- Summary ---

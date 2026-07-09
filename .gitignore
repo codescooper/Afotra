@@ -2,3 +2,8 @@ logs/
 tracker.lock
 .claude/
 .vscode/
+# Personal task data (contacts, phone numbers) - kept local like logs/
+tasks.json
+tasks.json.tmp
+tasks.json.repl
+tasks.json.*.bak

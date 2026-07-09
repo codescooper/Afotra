@@ -11,6 +11,7 @@ try {
     # Import modules
     Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
     Import-Module (Join-Path $scriptRoot "modules\Report.Core.psm1") -Force
+    Import-Module (Join-Path $scriptRoot "modules\Tasks.Core.psm1") -Force -DisableNameChecking
 
     $config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
     $logFolder = Join-Path $scriptRoot $config.logFolder
@@ -37,9 +38,15 @@ try {
     $date = Get-Date -Format "yyyy-MM-dd"
     $jsonFile = Join-Path $reportFolder "summary-$date.json"
 
-    Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile
+    $taskSummary = $null
+    try { $taskSummary = Get-TaskSummary -Tasks @(Get-Tasks) } catch { }
+
+    Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary
 
     Write-Host "Report saved: $jsonFile" -ForegroundColor Green
+    if ($taskSummary) {
+        Write-Host "  Tasks: $($taskSummary.AFaire) a faire / $($taskSummary.EnCours) en cours / $($taskSummary.TermineesAujourdhui) terminees auj. / $($taskSummary.EnRetard) en retard" -ForegroundColor White
+    }
     Write-Host "`nSummary:" -ForegroundColor Cyan
     Write-Host "  Total Tracked: $([math]::Round($reportData.TotalSeconds / 60, 2)) minutes" -ForegroundColor White
     Write-Host "  Focus Score: $($reportData.FocusScore)%" -ForegroundColor White
