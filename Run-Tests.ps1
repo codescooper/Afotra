@@ -56,7 +56,7 @@ Check "rules.json exists & valid JSON" {
     Assert ($r.categories.Count -gt 0) "no categories"
     "$($r.categories.Count) cats, $($r.processRules.Count) proc rules, $($r.titleRules.Count) title rules"
 }
-foreach ($m in @("Tracker.Core","Rules.Core","Report.Core","UI.Core","Tasks.Core","Notify.Core","Session.Core","Orb.Core")) {
+foreach ($m in @("Tracker.Core","Rules.Core","Report.Core","UI.Core","Tasks.Core","Notify.Core","Session.Core","Orb.Core","SessionReport.Core")) {
     # NB: pas de .GetNewClosure() ici — Check invoque le scriptblock immediatement
     # (donc $m a deja la bonne valeur), et la fermeture detacherait la portee du
     # script, rendant la fonction Assert invisible.
@@ -278,6 +278,16 @@ Check "Orb.Core : mapping humeur + garde" {
     Assert ($ask.SizePx -gt $idle.SizePx -and $ask.MoveToCenter) "Ask plus gros + recentre"
     Assert (-not (Test-ProcessAllowed -ProcessName 'chrome' -AllowList @('code'))) "chrome non liste"
     "Idle/Ask + tailles + allow-list OK"
+}
+Check "SessionReport.Core : bilan de tache (agregat sessions)" {
+    Import-Module (Join-Path $root "modules\SessionReport.Core.psm1") -Force -DisableNameChecking
+    $t = New-Task -Titre "R" -EstimeMinutes 30
+    $t.Sessions = @([PSCustomObject]@{ Debut="2026-07-09T09:00:00"; Fin="2026-07-09T09:25:00"; TravailSecondes=1500; GlobalSecondes=1800; PauseSecondes=300; PomodorosFait=1 })
+    $t.TempsTravailSecondes = 1500
+    $tr = Get-TaskReport -Task $t
+    Assert ($tr.NbSessions -eq 1 -and $tr.TravailMin -eq 25) "sessions=$($tr.NbSessions) travail=$($tr.TravailMin)"
+    Assert ((Format-TaskReportText -Report $tr).Length -gt 20) "texte vide"
+    "1 session, 25 min, texte OK"
 }
 
 # --- Summary ---

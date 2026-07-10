@@ -84,6 +84,27 @@ from a 1 s `DispatcherTimer`; a session's accumulated time is persisted onto the
 - **Efficiency**: `Get-TaskEfficiency` → `{ EstimeMin, TravailMin, EcartMin, Ratio }` (ratio > 1 =
   under budget). The Tâches grid shows **Estimé** and **Passé** columns.
 
+## Reports (session & task)
+
+Pure aggregation/formatting in `modules\SessionReport.Core.psm1` over the data already on each
+task (`Sessions[]`, `TempsTravail/GlobalSecondes`, `EstimeMinutes`, `DigressionsCount`);
+unit-tested in section K. The premise: **AFOTRA is used through a task decomposed into sessions**,
+so reports are session- and task-shaped.
+
+- `Get-SessionReport -Task -Session` → one session's bilan (travail/global/pause + ratio,
+  pomodoros, task progress vs estimate). `Get-TaskReport -Task` → the **bilan of all its
+  sessions** (totals, pause ratio, efficiency `EcartMin`/`Ratio`, pomodoros, digressions, and a
+  chronological **`Sessions[]` timeline**). Tolerant of tasks with no sessions (`NbSessions=0`).
+- Formatters: `Format-SessionReportText` / `Format-TaskReportText` (readable FR text) and
+  `Get-TaskReportMarkdown`. `Export-TaskReport -Task -Folder` writes `task-<id>-<date>.json` +
+  `.md` to `logs\reports\` (gitignored).
+- **UI**: ending a session (session panel *Terminer la tâche* / *Arrêter*) pops
+  `Show-SessionReportDialog` (auto bilan + *Voir le rapport de tâche*); the Tâches tab's
+  **Rapport** button opens `Show-TaskReportDialog` (totals + timeline + **Exporter**).
+- **Daily report**: `Export-ReportToJSON -TaskDetail` adds a `TasksDetail` array (a `Get-TaskReport`
+  per task that had sessions) to `summary-<date>.json`; `daily-report.ps1` and the dashboard's
+  *Generate Report* build it.
+
 ## Assistant orb & focus guard
 
 The overlay is now a **living sphere** that embodies the assistant. Its **colour, glow,

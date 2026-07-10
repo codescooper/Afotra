@@ -12,6 +12,7 @@ try {
     Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
     Import-Module (Join-Path $scriptRoot "modules\Report.Core.psm1") -Force
     Import-Module (Join-Path $scriptRoot "modules\Tasks.Core.psm1") -Force -DisableNameChecking
+    Import-Module (Join-Path $scriptRoot "modules\SessionReport.Core.psm1") -Force -DisableNameChecking
 
     $config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
     $logFolder = Join-Path $scriptRoot $config.logFolder
@@ -39,9 +40,15 @@ try {
     $jsonFile = Join-Path $reportFolder "summary-$date.json"
 
     $taskSummary = $null
-    try { $taskSummary = Get-TaskSummary -Tasks @(Get-Tasks) } catch { }
+    $taskDetail = $null
+    try {
+        $allTasks = @(Get-Tasks)
+        $taskSummary = Get-TaskSummary -Tasks $allTasks
+        # Per-task session bilan, only for tasks that actually had sessions.
+        $taskDetail = @($allTasks | Where-Object { @($_.Sessions).Count -gt 0 } | ForEach-Object { Get-TaskReport -Task $_ })
+    } catch { }
 
-    Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary
+    Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary -TaskDetail $taskDetail
 
     Write-Host "Report saved: $jsonFile" -ForegroundColor Green
     if ($taskSummary) {

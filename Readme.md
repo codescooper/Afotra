@@ -390,6 +390,20 @@ from the **Tâches** tab:
 - Time is saved onto the task (`Estimé` and `Passé` columns), and daily reports summarise the
   minutes worked and the number of tasks over budget.
 
+### Session & task reports
+
+AFOTRA is meant to be used **through a task, broken into sessions** — so it reports at both levels:
+
+- **End of a session** — closing a session (*Terminer la tâche* or *Arrêter*) pops a **bilan**:
+  work / global / pause time, pomodoros, and how far the task has progressed against its estimate.
+  One click opens the full task report.
+- **Task report** — the **Rapport** button (Tâches tab) shows the **bilan of every session** that
+  made up the task: totals, pause ratio, estimate-vs-actual efficiency, pomodoros, digressions,
+  and a **chronological timeline** of the sessions. **Exporter** writes it to `logs/reports/` as a
+  structured `.json` and a readable `.md`.
+- **Daily report** — `daily-report.ps1` (or *Generate Report*) adds a `TasksDetail` section to
+  `summary-<date>.json` with the per-task session bilan.
+
 Pomodoro cadence is configurable in `config.json`:
 
 ```json

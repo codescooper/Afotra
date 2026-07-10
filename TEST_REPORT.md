@@ -1,8 +1,8 @@
 ﻿# AFOTRA - Rapport de tests complet
 
-- **Date** : 2026-07-09 10:32:04
+- **Date** : 2026-07-09 13:17:40
 - **Machine** : DESKTOP-5PCC35H / utilisateur BEJ technologie
-- **Resultat** : **TOUS LES TESTS PASSENT (4 sautes : live/bureau)** (76/76)
+- **Resultat** : **TOUS LES TESTS PASSENT (4 sautes : live/bureau)** (81/81)
 - **Couverture** : configuration, classification (categories + priorites + casse), gestion des regles (round-trip), journalisation, reporting (+ cas limites), bout-en-bout (CLI, tracker live, daily-report, dashboard WPF, XAML)
 
 
@@ -82,7 +82,7 @@
 |:------:|-------------|--------|
 | PASS | config.json : idleThresholdSeconds + focusCategories presents | idle=180s, focus=[travail] |
 | PASS | rules.json : categorie 'inactif' presente | inactif present |
-| PASS | Get-IdleSeconds renvoie un entier >= 0 | 306 s d'inactivite |
+| PASS | Get-IdleSeconds renvoie un entier >= 0 | 606 s d'inactivite |
 | PASS | Get-IsSessionLocked : LockApp -> verrouille, Code -> non | detection verrou OK |
 | PASS | Measure-ContextSwitches : compte les transitions (A,A,B,A -> 2) | 2 transitions |
 | PASS | Verrou PID : Set/Test/Remove (PID courant=actif, PID mort=inactif) | cycle verrou OK |
@@ -141,7 +141,17 @@
 | PASS | Add-TaskDigression : incremente le compteur | digressions=2 |
 | PASS | Add-TaskTool : tolere une tache sans le champ OutilsTache | vieille tache toleree |
 
+## K. Rapports session & tache
+
+| Statut | Cas d'usage | Detail |
+|:------:|-------------|--------|
+| PASS | Get-SessionReport : travail/global/pause/ratio + avancement vs estime | session2: 25/30/5 min, avancement 150% |
+| PASS | Get-TaskReport : agrege les 2 sessions + timeline + efficacite | 2 sessions -> 45/55/10, ecart +15, timeline OK |
+| PASS | Get-TaskReport : tache sans session toleree (NbSessions=0) | tache vide: 0 session, pas de crash |
+| PASS | Formatters : textes non vides avec chiffres cles | textes + markdown OK |
+| PASS | Export-TaskReport : ecrit JSON + Markdown | task-*.json + .md ecrits, JSON valide |
+
 ---
 
-**Total : 76/76 reussis.** Genere par `Run-Full-Tests.ps1`.
+**Total : 81/81 reussis.** Genere par `Run-Full-Tests.ps1`.
 

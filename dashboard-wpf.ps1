@@ -44,6 +44,7 @@ try {
     Import-Module (Join-Path $scriptRoot "modules\Notify.Core.psm1") -Force -DisableNameChecking
     Import-Module (Join-Path $scriptRoot "modules\Session.Core.psm1") -Force -DisableNameChecking
     Import-Module (Join-Path $scriptRoot "modules\Orb.Core.psm1") -Force -DisableNameChecking
+    Import-Module (Join-Path $scriptRoot "modules\SessionReport.Core.psm1") -Force -DisableNameChecking
 } catch {
     [Windows.MessageBox]::Show("Error loading modules: $_", "AFOTRA Error") | Out-Null
     exit 1
@@ -433,6 +434,7 @@ $xaml = @"
                                 <Button x:Name="BtnTaskEdit" Content="Éditer" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
                                 <Button x:Name="BtnTaskComplete" Content="Terminer" Background="#10B981" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
                                 <Button x:Name="BtnTaskArchive" Content="Archiver" Background="#F59E0B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
+                                <Button x:Name="BtnTaskReport" Content="Rapport" Background="#8B5CF6" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,8,0"/>
                                 <Button x:Name="BtnTaskRefresh" Content="Rafraîchir" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
@@ -518,6 +520,7 @@ $btnTaskAdd = $window.FindName("BtnTaskAdd")
 $btnTaskEdit = $window.FindName("BtnTaskEdit")
 $btnTaskComplete = $window.FindName("BtnTaskComplete")
 $btnTaskArchive = $window.FindName("BtnTaskArchive")
+$btnTaskReport = $window.FindName("BtnTaskReport")
 $btnTaskRefresh = $window.FindName("BtnTaskRefresh")
 # Dashboard task summary labels
 $taskCountAFaire = $window.FindName("TaskCountAFaire")
@@ -975,8 +978,13 @@ $btnGenerateReport.Add_Click({
                 $date = Get-Date -Format "yyyy-MM-dd"
                 $jsonFile = Join-Path (Join-Path $global:logFolder "reports") "summary-$date.json"
                 $taskSummary = $null
-                try { $taskSummary = Get-TaskSummary -Tasks @(Get-Tasks -Path $global:taskStorePath) } catch { }
-                Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary
+                $taskDetail = $null
+                try {
+                    $allTasks = @(Get-Tasks -Path $global:taskStorePath)
+                    $taskSummary = Get-TaskSummary -Tasks $allTasks
+                    $taskDetail = @($allTasks | Where-Object { @($_.Sessions).Count -gt 0 } | ForEach-Object { Get-TaskReport -Task $_ })
+                } catch { }
+                Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary -TaskDetail $taskDetail
                 [Windows.MessageBox]::Show("Report generated!`n`n$jsonFile", "AFOTRA") | Out-Null
                 Explorer.exe $jsonFile
             }
@@ -1258,6 +1266,83 @@ function Show-TaskDialog {
     return $vals
 }
 
+function Show-TaskReportDialog {
+    param([object]$Task)
+    Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
+    $report = Get-TaskReport -Task $Task
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Rapport de tâche"; $form.Width = 620; $form.Height = 580; $form.StartPosition = "CenterScreen"
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $panel = New-Object System.Windows.Forms.Panel; $panel.Dock = "Bottom"; $panel.Height = 46; $form.Controls.Add($panel)
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true; $box.ReadOnly = $true; $box.ScrollBars = "Vertical"; $box.Dock = "Fill"
+    $box.Font = New-Object System.Drawing.Font("Consolas", 10); $box.BackColor = [System.Drawing.Color]::White
+    $box.Text = (Format-TaskReportText -Report $report)
+    $form.Controls.Add($box)
+
+    $btnExport = New-Object System.Windows.Forms.Button
+    $btnExport.Text = "Exporter (JSON + MD)"; $btnExport.Width = 180; $btnExport.Height = 30; $btnExport.Location = New-Object System.Drawing.Point(10, 8)
+    $btnExport.Add_Click({
+            try {
+                $folder = Join-Path $global:logFolder "reports"
+                $paths = Export-TaskReport -Task $Task -Folder $folder
+                [System.Windows.Forms.MessageBox]::Show("Exporté :`n$($paths.Json)`n$($paths.Markdown)", "AFOTRA") | Out-Null
+                Start-Process explorer.exe -ArgumentList $folder
+            } catch { [System.Windows.Forms.MessageBox]::Show("Erreur export : $_", "AFOTRA") | Out-Null }
+        }.GetNewClosure())
+    $panel.Controls.Add($btnExport)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "Fermer"; $btnClose.Width = 90; $btnClose.Height = 30; $btnClose.DialogResult = "OK"; $btnClose.Location = New-Object System.Drawing.Point(505, 8)
+    $panel.Controls.Add($btnClose); $form.AcceptButton = $btnClose
+
+    $form.ShowDialog() | Out-Null
+    $form.Dispose()
+}
+
+function Show-SessionReportDialog {
+    param([object]$Task, [object]$Session)
+    Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
+    $sr = Get-SessionReport -Task $Task -Session $Session
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Bilan de session"; $form.Width = 470; $form.Height = 390; $form.StartPosition = "CenterScreen"
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $panel = New-Object System.Windows.Forms.Panel; $panel.Dock = "Bottom"; $panel.Height = 46; $form.Controls.Add($panel)
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true; $box.ReadOnly = $true; $box.ScrollBars = "Vertical"; $box.Dock = "Fill"
+    $box.Font = New-Object System.Drawing.Font("Consolas", 10); $box.BackColor = [System.Drawing.Color]::White
+    $box.Text = (Format-SessionReportText -Report $sr)
+    $form.Controls.Add($box)
+
+    $btnTask = New-Object System.Windows.Forms.Button
+    $btnTask.Text = "Voir le rapport de tâche"; $btnTask.Width = 200; $btnTask.Height = 30; $btnTask.Location = New-Object System.Drawing.Point(10, 8)
+    $btnTask.Add_Click({ Show-TaskReportDialog -Task $Task }.GetNewClosure())
+    $panel.Controls.Add($btnTask)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "Fermer"; $btnClose.Width = 90; $btnClose.Height = 30; $btnClose.DialogResult = "OK"; $btnClose.Location = New-Object System.Drawing.Point(355, 8)
+    $panel.Controls.Add($btnClose); $form.AcceptButton = $btnClose
+
+    $form.ShowDialog() | Out-Null
+    $form.Dispose()
+}
+
+function Show-EndedSessionReport {
+    # Reload the task and show the bilan of the session that was just appended.
+    param([string]$TaskId)
+    try {
+        $task = @(Get-Tasks -Path $global:taskStorePath | Where-Object { $_.Id -eq $TaskId })[0]
+        if (-not $task) { return }
+        $sessions = @($task.Sessions)
+        if ($sessions.Count -eq 0) { return }
+        Show-SessionReportDialog -Task $task -Session $sessions[$sessions.Count - 1]
+    } catch { if ($Debug) { Write-Warning "Show-EndedSessionReport: $_" } }
+}
+
 $btnTaskAdd.Add_Click({
     $vals = Show-TaskDialog
     if ($vals) {
@@ -1308,6 +1393,12 @@ $btnTaskArchive.Add_Click({
     if (-not $sel) { [System.Windows.MessageBox]::Show("Sélectionnez une tâche.", "AFOTRA") | Out-Null; return }
     Archive-Task -Id $sel.Id -Path $global:taskStorePath | Out-Null
     Update-Tasks-UI
+})
+
+$btnTaskReport.Add_Click({
+    $t = Get-SelectedTask
+    if (-not $t) { [System.Windows.MessageBox]::Show("Sélectionnez une tâche.", "AFOTRA") | Out-Null; return }
+    Show-TaskReportDialog -Task $t
 })
 
 $btnTaskRefresh.Add_Click({ Update-Tasks-UI })
@@ -1404,6 +1495,7 @@ function Stop-CurrentSession {
     if (-not $global:SessionState) { return $null }
     $taskId = $global:SessionState.TaskId
     $res = Get-SessionResult -State $global:SessionState -Now $Now
+    $global:LastSessionResult = $res   # exposed so the end-of-session report can use it
     try { Add-TaskSession -Id $taskId -Result $res -Path $global:taskStorePath | Out-Null } catch { if ($Debug) { Write-Warning "Add-TaskSession failed: $_" } }
     $global:SessionState = $null
     if ($global:SessionTimer) { $global:SessionTimer.Stop(); $global:SessionTimer = $null }
@@ -1522,11 +1614,13 @@ $btnSessComplete.Add_Click({
     $id = Stop-CurrentSession
     if ($id) { Complete-Task -Id $id -Path $global:taskStorePath | Out-Null }
     Update-SessionUI; Update-SessionButtons; Update-Tasks-UI
+    if ($id) { Show-EndedSessionReport -TaskId $id }
 })
 
 $btnSessStop.Add_Click({
-    Stop-CurrentSession | Out-Null
+    $id = Stop-CurrentSession
     Update-SessionUI; Update-SessionButtons; Update-Tasks-UI
+    if ($id) { Show-EndedSessionReport -TaskId $id }
 })
 
 # Evening reminder timer: fires due reminders (daily recurrence via NotifieLe guard).

@@ -101,7 +101,8 @@ function Export-ReportToJSON {
     param (
         [object]$ReportData,
         [string]$OutputFile,
-        [object]$TaskSummary = $null
+        [object]$TaskSummary = $null,
+        [object]$TaskDetail = $null
     )
     
     $folder = Split-Path -Parent $OutputFile
@@ -132,6 +133,10 @@ function Export-ReportToJSON {
     # Optional Tasks section (counts: a faire / en cours / terminees aujourd'hui / en retard)
     if ($null -ne $TaskSummary) {
         $summary["Tasks"] = $TaskSummary
+    }
+    # Optional per-task session detail (bilan of the sessions that made up each task)
+    if ($null -ne $TaskDetail) {
+        $summary["TasksDetail"] = @($TaskDetail)
     }
 
     $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $OutputFile -Encoding UTF8 -Force

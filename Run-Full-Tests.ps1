@@ -53,6 +53,7 @@ Import-Module (Join-Path $root "modules\Tasks.Core.psm1")   -Force -DisableNameC
 Import-Module (Join-Path $root "modules\Notify.Core.psm1")  -Force -DisableNameChecking
 Import-Module (Join-Path $root "modules\Session.Core.psm1") -Force -DisableNameChecking
 Import-Module (Join-Path $root "modules\Orb.Core.psm1")     -Force -DisableNameChecking
+Import-Module (Join-Path $root "modules\SessionReport.Core.psm1") -Force -DisableNameChecking
 $rules = Load-Rules -RulesPath (Join-Path $root "rules.json")
 
 function New-TempStore { Join-Path $env:TEMP ("afotra_test_" + [guid]::NewGuid().ToString('N') + ".json") }
@@ -785,6 +786,68 @@ Check "Add-TaskTool : tolere une tache sans le champ OutilsTache" {
     Remove-Item "$store*" -ErrorAction SilentlyContinue
     Assert (@($back.OutilsTache).Count -eq 1 -and (Test-TaskToolAllowed -Task $back -Process 'blender')) "vieille tache: outil ajoute"
     "vieille tache toleree" }
+
+# ===================================================================
+Section "K. Rapports session & tache"
+
+function New-TaskWith2Sessions {
+    $t = New-Task -Titre "Devis resto" -Categorie "AWEMA/Clients" -EstimeMinutes 30
+    $t | Add-Member DigressionsCount 2 -Force
+    $t.Sessions = @(
+        [PSCustomObject]@{ Debut="2026-07-09T09:00:00"; Fin="2026-07-09T09:25:00"; TravailSecondes=1200; GlobalSecondes=1500; PauseSecondes=300; PomodorosFait=1 },
+        [PSCustomObject]@{ Debut="2026-07-09T11:00:00"; Fin="2026-07-09T11:30:00"; TravailSecondes=1500; GlobalSecondes=1800; PauseSecondes=300; PomodorosFait=1 }
+    )
+    $t.TempsTravailSecondes = 2700; $t.TempsGlobalSecondes = 3300
+    return $t
+}
+
+Check "Get-SessionReport : travail/global/pause/ratio + avancement vs estime" {
+    $t = New-TaskWith2Sessions
+    $sr = Get-SessionReport -Task $t -Session $t.Sessions[1]
+    Assert ($sr.TravailMin -eq 25 -and $sr.GlobalMin -eq 30 -and $sr.PauseMin -eq 5) "temps: t=$($sr.TravailMin) g=$($sr.GlobalMin) p=$($sr.PauseMin)"
+    Assert ($sr.PauseRatio -eq 0.17) "pause ratio=$($sr.PauseRatio)"
+    Assert ($sr.AvancementPct -eq 150) "avancement=$($sr.AvancementPct)% (45 sur 30 estime)"
+    "session2: 25/30/5 min, avancement 150%" }
+
+Check "Get-TaskReport : agrege les 2 sessions + timeline + efficacite" {
+    $t = New-TaskWith2Sessions
+    $tr = Get-TaskReport -Task $t
+    Assert ($tr.NbSessions -eq 2) "NbSessions=$($tr.NbSessions)"
+    Assert ($tr.TravailMin -eq 45 -and $tr.GlobalMin -eq 55 -and $tr.PauseMin -eq 10) "totaux: $($tr.TravailMin)/$($tr.GlobalMin)/$($tr.PauseMin)"
+    Assert ($tr.Pomodoros -eq 2 -and $tr.Digressions -eq 2) "pomo=$($tr.Pomodoros) digress=$($tr.Digressions)"
+    Assert ($tr.EcartMin -eq 15 -and $tr.Ratio -eq 0.67) "efficacite ecart=$($tr.EcartMin) ratio=$($tr.Ratio)"
+    Assert (@($tr.Sessions).Count -eq 2 -and $tr.Sessions[0].N -eq 1) "timeline ordonnee ($(@($tr.Sessions).Count))"
+    "2 sessions -> 45/55/10, ecart +15, timeline OK" }
+
+Check "Get-TaskReport : tache sans session toleree (NbSessions=0)" {
+    $empty = New-Task -Titre "Vide"
+    $tr = Get-TaskReport -Task $empty
+    Assert ($tr.NbSessions -eq 0 -and $tr.TravailMin -eq 0) "vide: sessions=$($tr.NbSessions) travail=$($tr.TravailMin)"
+    "tache vide: 0 session, pas de crash" }
+
+Check "Formatters : textes non vides avec chiffres cles" {
+    $t = New-TaskWith2Sessions
+    $tr = Get-TaskReport -Task $t
+    $sr = Get-SessionReport -Task $t -Session $t.Sessions[0]
+    $txtT = Format-TaskReportText -Report $tr
+    $txtS = Format-SessionReportText -Report $sr
+    $md = Get-TaskReportMarkdown -Report $tr
+    Assert ($txtT -match 'Timeline' -and $txtT -match '45') "task text KO"
+    Assert ($txtS.Length -gt 20) "session text vide"
+    Assert ($md -match '# Rapport de t' -and $md -match '\| Sessions \|') "markdown KO"
+    "textes + markdown OK" }
+
+Check "Export-TaskReport : ecrit JSON + Markdown" {
+    $t = New-TaskWith2Sessions
+    $tmp = Join-Path $env:TEMP ("afrep_" + [guid]::NewGuid().ToString('N'))
+    $paths = Export-TaskReport -Task $t -Folder $tmp
+    $ok = (Test-Path $paths.Json) -and (Test-Path $paths.Markdown)
+    $jsonValid = $false
+    try { $null = Get-Content $paths.Json -Raw | ConvertFrom-Json; $jsonValid = $true } catch { }
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Assert ($ok) "fichiers manquants"
+    Assert ($jsonValid) "JSON invalide"
+    "task-*.json + .md ecrits, JSON valide" }
 
 # ===================================================================
 # Rapport
