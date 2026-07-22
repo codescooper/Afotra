@@ -182,11 +182,13 @@ Check "Initialize-LogFile : entete ecrite une seule fois (idempotent)" {
 Check "Write-ActivityLog : 10 colonnes dans le bon ordre" {
     $tmp = Join-Path $env:TEMP ("afotra_w_{0}.csv" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
     Initialize-LogFile -LogFile $tmp
-    Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="UnitApp";ProcessId=42;WindowTitle="Titre";Category="travail"}) -SampleSeconds 5
+    $title = 'Titre, avec "guillemets"'
+    Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="UnitApp";ProcessId=42;WindowTitle=$title;Category="travail"}) -SampleSeconds 5
     $row = @(Import-Csv $tmp -Encoding UTF8)[0]
     Remove-Item $tmp -ErrorAction SilentlyContinue
     Assert ($row.ProcessName -eq "UnitApp") "ProcessName errone"
     Assert ($row.ProcessId -eq "42") "ProcessId errone"
+    Assert ($row.WindowTitle -eq $title) "WindowTitle CSV mal echappe"
     Assert ($row.Category -eq "travail") "Category erronee"
     Assert ($row.SampleSeconds -eq "5") "SampleSeconds errone"
     Assert ($row.UserName -eq $env:USERNAME) "UserName errone"
@@ -214,7 +216,7 @@ Check "Get-ReportData : agrege les 'inconnu' (Unknowns)" {
     1..4 | ForEach-Object { Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ProcessName="mystery";ProcessId=9;WindowTitle="boite";Category="inconnu"}) -SampleSeconds 5 }
     $rd = Get-ReportData -LogFile $tmp
     Remove-Item $tmp -ErrorAction SilentlyContinue
-    $k = "mystery|boite"
+    $k = "mystery$([char]31)boite"
     Assert ($rd.Unknowns[$k].Count -eq 4) "count=$($rd.Unknowns[$k].Count)"
     Assert ($rd.Unknowns[$k].Seconds -eq 20) "sec=$($rd.Unknowns[$k].Seconds)"
     "inconnu agrege: 4 occ / 20s" }
@@ -725,9 +727,9 @@ Check "Get-OrbVisual : humeur Resume distincte (appelle a reprendre)" {
     $resume = Get-OrbVisual Resume
     $break  = Get-OrbVisual Break
     Assert ($resume.SizePx -gt $break.SizePx) "Resume plus gros que Break: $($resume.SizePx) vs $($break.SizePx)"
-    Assert ($resume.Edge -eq '#10B981') "Resume en vert (focus qui revient)"
+    Assert ($resume.Edge -eq '#FFD740') "Resume en or (rappel de reprise)"
     Assert ($resume.PulsePeriodMs -lt $break.PulsePeriodMs) "Resume pulse plus vite (attire l'oeil)"
-    "Resume: vert, plus gros, pulse rapide" }
+    "Resume: or, plus gros, pulse rapide" }
 
 Check "Get-OrbVisual : tailles Ask > Overrun > Focus > Idle + recentrage Ask" {
     $idle = Get-OrbVisual Idle
@@ -736,14 +738,16 @@ Check "Get-OrbVisual : tailles Ask > Overrun > Focus > Idle + recentrage Ask" {
     $ask = Get-OrbVisual Ask 1.0
     Assert ($ask.SizePx -gt $over.SizePx -and $over.SizePx -gt $focus.SizePx -and $focus.SizePx -gt $idle.SizePx) "ordre tailles KO: $($idle.SizePx)/$($focus.SizePx)/$($over.SizePx)/$($ask.SizePx)"
     Assert ($ask.MoveToCenter -and -not $focus.MoveToCenter) "recentrage seulement en Ask"
-    Assert ($idle.Edge -eq '#14B8A6' -and $focus.Edge -eq '#10B981' -and $ask.Edge -eq '#EF4444') "couleurs KO"
+    Assert ($idle.Edge -eq '#FFB300' -and $focus.Edge -eq '#FFA000' -and $ask.Edge -eq '#EF4444') "couleurs abeille KO"
     "idle=$($idle.SizePx) focus=$($focus.SizePx) over=$($over.SizePx) ask=$($ask.SizePx), recentre Ask" }
 
-Check "Get-OrbVisual : Ask grossit avec l'intensite" {
+Check "Get-OrbVisual : Ask escalade avec l'intensite (plus gros, plus rapide, plus lumineux)" {
     $a0 = Get-OrbVisual Ask 0.0
     $a1 = Get-OrbVisual Ask 1.0
-    Assert ($a1.SizePx -gt $a0.SizePx) "intensite: $($a0.SizePx) -> $($a1.SizePx)"
-    "$($a0.SizePx) -> $($a1.SizePx)" }
+    Assert ($a1.SizePx -gt $a0.SizePx) "taille: $($a0.SizePx) -> $($a1.SizePx)"
+    Assert ($a1.PulsePeriodMs -lt $a0.PulsePeriodMs) "pulse plus rapide: $($a0.PulsePeriodMs) -> $($a1.PulsePeriodMs)"
+    Assert ($a1.GlowRadius -gt $a0.GlowRadius) "lueur plus forte: $($a0.GlowRadius) -> $($a1.GlowRadius)"
+    "taille $($a0.SizePx)->$($a1.SizePx), pulse $($a0.PulsePeriodMs)->$($a1.PulsePeriodMs)ms, lueur $($a0.GlowRadius)->$($a1.GlowRadius)" }
 
 Check "Test-ProcessAllowed : liste, casse, AFOTRA tolere" {
     Assert (-not (Test-ProcessAllowed -ProcessName 'chrome' -AllowList @('Code'))) "chrome non liste"

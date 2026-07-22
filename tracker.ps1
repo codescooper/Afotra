@@ -9,15 +9,15 @@ param (
 
 $ErrorActionPreference = "Stop"
 
+$scriptRoot = $PSScriptRoot
+$configPath = Join-Path $scriptRoot "config.json"
+$rulesPath = Join-Path $scriptRoot "rules.json"
+
+# Import modules
+Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
+Import-Module (Join-Path $scriptRoot "modules\Rules.Core.psm1") -Force
+
 try {
-    $scriptRoot = $PSScriptRoot
-    $configPath = Join-Path $scriptRoot "config.json"
-    $rulesPath = Join-Path $scriptRoot "rules.json"
-
-    # Import modules
-    Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
-    Import-Module (Join-Path $scriptRoot "modules\Rules.Core.psm1") -Force
-
     $config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
     $rules = Load-Rules -RulesPath $rulesPath
     $logFolder = Join-Path $scriptRoot $config.logFolder

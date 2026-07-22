@@ -1,4 +1,4 @@
-# Tracker.Core.psm1 - Core functions for tracking PC activity
+﻿# Tracker.Core.psm1 - Core functions for tracking PC activity
 # Author: CodeScooper
 # Project: AFOTRA - Awema Focus Tracker
 
@@ -128,9 +128,24 @@ function Write-ActivityLog {
     $time = Get-Date -Format "HH:mm:ss"
     $userName = $env:USERNAME
     $machineName = $env:COMPUTERNAME
+    $safeWindowTitle = if ($null -ne $ActivityInfo.WindowTitle) {
+        $ActivityInfo.WindowTitle -replace "(\r\n|\r|\n)", " "
+    } else {
+        ""
+    }
     
-    $line = "$timestamp,$date,$time,$($ActivityInfo.ProcessName),$($ActivityInfo.ProcessId),$($ActivityInfo.WindowTitle),$($ActivityInfo.Category),$SampleSeconds,$userName,$machineName"
-    $line | Out-File -FilePath $LogFile -Append -Encoding UTF8
+    [PSCustomObject]([ordered]@{
+        Timestamp     = $timestamp
+        Date          = $date
+        Time          = $time
+        ProcessName   = $ActivityInfo.ProcessName
+        ProcessId     = $ActivityInfo.ProcessId
+        WindowTitle   = $safeWindowTitle
+        Category      = $ActivityInfo.Category
+        SampleSeconds = $SampleSeconds
+        UserName      = $userName
+        MachineName   = $machineName
+    }) | Export-Csv -Path $LogFile -Append -NoTypeInformation -Encoding UTF8
 }
 
 function Get-TodayLogFile {

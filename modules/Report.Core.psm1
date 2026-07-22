@@ -1,4 +1,4 @@
-# Report.Core.psm1 - Core functions for generating reports
+﻿# Report.Core.psm1 - Core functions for generating reports
 # Author: CodeScooper
 # Project: AFOTRA - Awema Focus Tracker
 
@@ -37,6 +37,7 @@ function Get-ReportData {
         $processes = @{}
         $unknowns = @{}
 
+        $groupSeparator = [char]31
         foreach ($row in $data) {
             # Categories
             if (!$categories[$row.Category]) {
@@ -52,7 +53,7 @@ function Get-ReportData {
 
             # Unknowns
             if ($row.Category -eq "inconnu") {
-                $key = "$($row.ProcessName)|$($row.WindowTitle)"
+                $key = "$($row.ProcessName)$groupSeparator$($row.WindowTitle)"
                 if (!$unknowns[$key]) {
                     $unknowns[$key] = @{
                         ProcessName = $row.ProcessName
