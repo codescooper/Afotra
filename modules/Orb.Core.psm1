@@ -31,30 +31,39 @@ function Get-OrbVisual {
 
     switch ($Mood) {
         'Focus' {
-            $v = @{ Core = '#34D399'; Edge = '#10B981'; Glow = '#10B981'; GlowRadius = 26
+            # amber-gold honey — the bee is at work
+            $v = @{ Core = '#FFCA28'; Edge = '#FFA000'; Glow = '#FFB300'; GlowRadius = 26
                     SizePx = 112; PulseAmp = 0.05;  PulsePeriodMs = 2500; WobbleAmp = 0.03; MoveToCenter = $false }
         }
         'Break' {
-            $v = @{ Core = '#A78BFA'; Edge = '#8B5CF6'; Glow = '#8B5CF6'; GlowRadius = 22
+            # muted honey — resting
+            $v = @{ Core = '#E6C15A'; Edge = '#C9922B'; Glow = '#C9922B'; GlowRadius = 22
                     SizePx = 104; PulseAmp = 0.03;  PulsePeriodMs = 4200; WobbleAmp = 0.02; MoveToCenter = $false }
         }
         'Overrun' {
-            $v = @{ Core = '#FB923C'; Edge = '#F97316'; Glow = '#F97316'; GlowRadius = 34
+            $v = @{ Core = '#FB8C00'; Edge = '#F4511E'; Glow = '#F4511E'; GlowRadius = 34
                     SizePx = 126; PulseAmp = 0.08;  PulsePeriodMs = 1200; WobbleAmp = 0.05; MoveToCenter = $false }
         }
         'Resume' {
-            # Break is over: an inviting, attention-grabbing "come back to work" bloom.
-            $v = @{ Core = '#6EE7B7'; Edge = '#10B981'; Glow = '#34D399'; GlowRadius = 42
+            # Break is over: a lively golden bloom calling the bee back to work.
+            $v = @{ Core = '#FFE082'; Edge = '#FFD740'; Glow = '#FFC400'; GlowRadius = 42
                     SizePx = 150; PulseAmp = 0.11;  PulsePeriodMs = 900;  WobbleAmp = 0.04; MoveToCenter = $false }
         }
         'Ask' {
+            # Escalates with intensity: bigger, brighter, faster, more agitated the longer
+            # the user stays off-task (and each "Non" bumps the intensity).
             $i = [math]::Max(0.0, [math]::Min(1.0, $Intensity))
-            $v = @{ Core = '#F87171'; Edge = '#EF4444'; Glow = '#EF4444'; GlowRadius = 48
-                    SizePx = [int](180 + 240 * $i); PulseAmp = 0.12; PulsePeriodMs = 650; WobbleAmp = 0.09; MoveToCenter = $true }
+            $v = @{ Core = '#F87171'; Edge = '#EF4444'; Glow = '#EF4444'
+                    GlowRadius    = [int](40 + 34 * $i)
+                    SizePx        = [int](180 + 240 * $i)
+                    PulseAmp      = 0.10 + 0.07 * $i
+                    PulsePeriodMs = [int](760 - 340 * $i)
+                    WobbleAmp     = 0.07 + 0.06 * $i
+                    MoveToCenter  = $true }
         }
         default {
-            # Idle
-            $v = @{ Core = '#5EEAD4'; Edge = '#14B8A6'; Glow = '#14B8A6'; GlowRadius = 18
+            # Idle — sleepy honey bee
+            $v = @{ Core = '#FFD54F'; Edge = '#FFB300'; Glow = '#FFB300'; GlowRadius = 18
                     SizePx = 92;  PulseAmp = 0.035; PulsePeriodMs = 4000; WobbleAmp = 0.02; MoveToCenter = $false }
         }
     }

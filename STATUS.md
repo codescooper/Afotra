@@ -1,263 +1,42 @@
-# PROJECT COMPLETION SUMMARY
-
-## 📊 AFOTRA - Awema Focus Tracker
-
-### Status: ✅ FULLY FUNCTIONAL v2.0
-
----
-
-## What Was Done
-
-### 🔧 Bug Fixes & Improvements
-
-| Issue | Status | Solution |
-|-------|--------|----------|
-| Dashboard WPF not functional | ✅ FIXED | Complete rewrite with proper event handling |
-| Missing display elements | ✅ FIXED | Rebuilt UI with all required components |
-| No file system setup | ✅ FIXED | Auto-create logs and reports directories |
-| Button events not working | ✅ FIXED | Implemented all click handlers |
-| Settings not persisting | ✅ FIXED | Added proper JSON save/load |
-| Charts not rendering | ✅ FIXED | Rewrote chart drawing logic |
-| Real-time updates frozen | ✅ FIXED | Added 1.5s refresh timer |
-| Unknown activities hard to categorize | ✅ FIXED | Added UI dialogs for quick categorization |
-
----
-
-## 📁 Project Structure
-
-```
-✅ All Files Present & Functional:
-
-Scripts (Ready to Run)
-├── dashboard-wpf.ps1          ← Main UI (FIXED)
-├── tracker.ps1               ← Standalone tracking
-├── daily-report.ps1          ← Report generation
-├── quick-check.ps1           ← Verification (NEW)
-└── run-dashboard-wpf.bat     ← Launcher (FIXED)
-
-Modules (Core Engines)
-├── Tracker.Core.psm1         ← Activity detection
-├── Rules.Core.psm1           ← Classification
-└── Report.Core.psm1          ← Reports
-
-Configuration
-├── config.json               ← Settings
-└── rules.json                ← Categories
-
-Data Directories (Auto-Created)
-└── logs/
-    ├── activity-*.csv        (Daily logs)
-    └── reports/
-        └── summary-*.json    (Daily reports)
-
-Documentation
-├── Readme.md                 ← Full guide
-├── QUICK_START.md            ← Quick setup
-├── DELIVERY_REPORT.md        ← This summary
-└── TEST_PLAN.md              ← Testing guide
-```
-
----
-
-## 🚀 Quick Start
-
-### Launch Application
-```
-Option 1: Double-click run-dashboard-wpf.bat
-Option 2: powershell .\dashboard-wpf.ps1
-Option 3: verify with .\quick-check.ps1
-```
-
-### First Use
-1. Click "▶ Start Tracking"
-2. Switch between applications
-3. Watch real-time activity in Live Tracking tab
-4. Categorize unknown activities
-5. Click "Generate Report" to get insights
-
----
-
-## ✅ Features Now Working
-
-### 📊 Dashboard
-- [x] Multi-tab interface (Dashboard, Live, Unknown, Rules)
-- [x] Real-time metrics (Total time, Focus, Score, Distractions)
-- [x] Activity distribution chart
-- [x] Current activity display in sidebar
-- [x] Status indicator (Running/Stopped)
-
-### 🎯 Live Tracking
-- [x] Real-time process display
-- [x] Window title capture
-- [x] Category assignment
-- [x] Duration timer
-- [x] Recent activities list
-
-### ❓ Unknown Activities
-- [x] Auto-detection of unclassified activities
-- [x] Quick categorization UI
-- [x] Automatic rule creation
-- [x] Rule persistence
-
-### ⚙️ Rules Management
-- [x] Category management
-- [x] Process-based rules
-- [x] Title-based rules
-- [x] Add/delete operations
-
-### 📈 Reports
-- [x] Daily CSV logs
-- [x] JSON reports with metrics
-- [x] Focus score calculation
-- [x] Category breakdowns
-- [x] Top applications ranking
-
----
-
-## 🎯 Project Objectives - All Met
-
-From README:
-- ✅ Monitor real-time PC usage
-- ✅ Automatically classify activities
-- ✅ Store daily activity logs
-- ✅ Generate productivity reports
-- ✅ Provide intuitive GUI
-- ✅ Support easy customization
-- ✅ Help identify patterns
-
----
-
-## 📊 Testing Results
-
-```
-Environment Check ................. PASS
-File Structure .................... PASS
-Configuration Files ............... PASS
-Module Imports .................... PASS
-Dashboard Launch .................. PASS
-UI Responsiveness ................. PASS
-All Features ...................... READY
-```
-
----
-
-## 🔍 Technical Details
-
-- **Language**: PowerShell 5.0+
-- **UI Framework**: Windows Presentation Foundation (WPF)
-- **Detection**: Win32 API (GetForegroundWindow)
-- **Storage**: UTF-8 CSV + JSON
-- **Performance**: ~10-15MB RAM, 10s sample interval
-- **Privacy**: 100% local, no external connections
-
----
-
-## 📝 Configuration
-
-### config.json
-```json
-{
-  "sampleIntervalSeconds": 10,      // Track every 10 seconds
-  "focusMinPerDay": 480,            // 8 hour focus goal
-  "maxDistractionMinPerDay": 120,   // 2 hour max distraction
-  "logFolder": "logs"               // Data location
-}
-```
-
-### rules.json
-Categories: travail, etude, communication, distraction, inconnu
-
-Add custom rules via the Rules tab UI.
-
----
-
-## 🎮 How to Use
-
-### Track Work Sessions
-1. Click "Start Tracking"
-2. Work normally
-3. Dashboard updates in real-time
-
-### Improve Categorization
-1. Go to "Unknown Activities"
-2. Select unknown activity
-3. Categorize it
-4. Rule automatically created
-
-### Review Progress
-1. Check dashboard metrics
-2. Export daily reports
-3. Analyze productivity patterns
-4. Adjust rules as needed
-
----
-
-## 🛠️ Files Changed/Created in This Update
-
-### Rewritten
-- `dashboard-wpf.ps1` - Complete modernization
-
-### Updated
-- `run-dashboard-wpf.bat` - Improved error handling
-- `QUICK_START.md` - v2.0 instructions
-- `DELIVERY_REPORT.md` - Status update
-
-### Created
-- `quick-check.ps1` - Environment verification
-
-### Unchanged (Working Fine)
-- All core modules
-- Config/rules files
-- Tracker and report scripts
-
----
-
-## ✨ Improvements in v2.0
-
-**vs v1.0:**
-| Feature | v1.0 | v2.0 |
-|---------|------|------|
-| Dashboard | Basic | Modern WPF |
-| Real-time | No | Yes (1.5s) |
-| UI Tabs | Limited | Full navigation |
-| Categorization | Manual | Auto with UI |
-| Charts | None | Activity distribution |
-| Error Handling | Minimal | Comprehensive |
-| Documentation | Basic | Detailed |
-
----
-
-## 🎓 What You Can Do Now
-
-✅ Launch the dashboard
-✅ Track daily activities
-✅ Generate productivity reports
-✅ Manage classification rules
-✅ Export activity history
-✅ Analyze focus patterns
-✅ Run standalone tracker
-✅ Customize categories
-✅ Set personal goals
-
----
-
-## 📚 Documentation
-
-See:
-- `Readme.md` - Full comprehensive guide
-- `QUICK_START.md` - Getting started (5 min)
-- `DELIVERY_REPORT.md` - Status & features (this file)
-- `TEST_PLAN.md` - Testing checklist
-
----
-
-## 🚀 Ready for Production
-
-All objectives met. All bugs fixed. Interface improved. Fully functional.
-
-**Status**: ✅ Complete
-**Version**: 2.0
-**Date**: April 8, 2026
-**License**: MIT
-
-Start tracking now!
+# AFOTRA - Awema Focus Tracker
+
+**Derniere MAJ : 2026-07-16**
+> Statut apres stabilisation des sessions actives, du live tracking et des rapports.
+
+## Phase
+Stabilisation fonctionnelle de la v2.1 : dashboard WPF, taches, sessions Pomodoro, rapports, tracking live et assistant focus guard.
+
+## Etat actuel
+- [x] Le dashboard WPF se lance avec la fenetre principale declaree explicitement comme `Application.MainWindow`.
+- [x] Les exceptions WPF et evenements critiques de session sont traces dans `logs/dashboard-runtime.log`.
+- [x] Le live tracking demarre automatiquement avec une session de tache et ecrit `logs/activity-YYYY-MM-DD.csv`.
+- [x] Le bouton overlay affiche maintenant `Live ON/OFF` au lieu d'un ambigu `Start`.
+- [x] Les sessions actives sont sauvegardees chaque seconde dans `logs/session-current.json` et recuperees au redemarrage.
+- [x] Le passage Pomodoro ne force plus une pause automatique : il suggere une pause et laisse la session continuer en depassement.
+- [x] Le dashboard et l'overlay utilisent la meme source de temps (`SessionReadout`) pour eviter les compteurs divergents.
+- [x] Les jalons temps affichent une bulle mascotte : 10 min ecoulees, puis 5 min restantes.
+- [x] Les rapports filtrent maintenant les vraies sessions au lieu d'inclure des taches sans session.
+- [x] Le rapport du jour `summary-2026-07-16.json` a ete genere avec les donnees live et les sessions de taches.
+- [x] Suite complete relancee le 2026-07-16 : **81/81 tests reussis**, **4 tests live/bureau sautes** (`TEST_REPORT.md`).
+- [x] Parser PowerShell : **18 fichiers OK**.
+
+## Ce qui reste a valider
+- [ ] Validation live longue : laisser tourner une session complete 25+ min, confirmer que la fenetre reste ouverte, que le checkpoint disparait apres arret propre et que la session est persistee une seule fois.
+- [ ] Validation visuelle reelle : boutons grises, selection de tache, scrollbars, taille min/max, overlay et bulles sur plusieurs tailles d'ecran.
+- [ ] Validation focus guard/orbe : pendant une session, ouvrir un outil non autorise, tester Oui / Non / Ignorer et verifier l'escalade.
+- [ ] Validation rappels du soir et notifications hors app via `afotra-notify.ps1` / Task Scheduler.
+- [ ] Ajouter des tests automatises pour les nouveaux helpers dashboard : session active incluse dans rapports, filtre de sessions reelles, libelle overlay `Live ON/OFF`.
+- [ ] Nettoyer les docs v1 restantes (`Readme.md`, `QUICK_START.md`, `DELIVERY_REPORT.md`) et les mentions `ExecutionPolicy Bypass` dans les tests/docs.
+
+## Risques connus
+- Les 4 tests live/bureau sont volontairement sautes en automatique : ils demandent un vrai bureau interactif.
+- `dashboard-wpf.ps1` contient un gros changement non commit : risque principal = regression UI observee seulement a l'usage.
+- Le script `daily-report.ps1` n'inclut pas une session active en memoire ; le bouton dashboard le fait. Une session doit etre arretee ou recuperee depuis checkpoint pour apparaitre dans le rapport CLI.
+- La logique WPF reste concentree dans un tres gros fichier, ce qui rend les regressions UI plus probables.
+- Plusieurs fichiers sont modifies dans le working tree ; il faut committer par lots propres avant de considerer la version stabilisee.
+
+## Prochaine etape recommandee
+Faire une validation live guidee : demarrer une session courte, verifier `Live ON`, laisser 2-3 minutes, generer un rapport depuis le dashboard, arreter la session, puis verifier que la colonne `Passe`, le rapport de tache et `summary-YYYY-MM-DD.json` racontent la meme histoire.
+
+## Stack & structure
+PowerShell 5.1+ sur Windows, dashboard WPF principal (`dashboard-wpf.ps1`), helper WinForms legacy (`modules/UI.Core.psm1`), modules purs sous `modules/`, stockage local `logs/`, `logs/reports/`, `tasks.json` gitignore, CI Windows via GitHub Actions.

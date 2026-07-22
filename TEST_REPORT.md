@@ -1,6 +1,6 @@
 ﻿# AFOTRA - Rapport de tests complet
 
-- **Date** : 2026-07-09 13:17:40
+- **Date** : 2026-07-22 13:32:45
 - **Machine** : DESKTOP-5PCC35H / utilisateur BEJ technologie
 - **Resultat** : **TOUS LES TESTS PASSENT (4 sautes : live/bureau)** (81/81)
 - **Couverture** : configuration, classification (categories + priorites + casse), gestion des regles (round-trip), journalisation, reporting (+ cas limites), bout-en-bout (CLI, tracker live, daily-report, dashboard WPF, XAML)
@@ -50,7 +50,7 @@
 
 | Statut | Cas d'usage | Detail |
 |:------:|-------------|--------|
-| PASS | Get-TodayLogFile : format activity-YYYY-MM-DD.csv | activity-2026-07-09.csv |
+| PASS | Get-TodayLogFile : format activity-YYYY-MM-DD.csv | activity-2026-07-22.csv |
 | PASS | Initialize-LogFile : entete ecrite une seule fois (idempotent) | 1 ligne d'entete |
 | PASS | Write-ActivityLog : 10 colonnes dans le bon ordre | colonnes & valeurs OK |
 
@@ -82,7 +82,7 @@
 |:------:|-------------|--------|
 | PASS | config.json : idleThresholdSeconds + focusCategories presents | idle=180s, focus=[travail] |
 | PASS | rules.json : categorie 'inactif' presente | inactif present |
-| PASS | Get-IdleSeconds renvoie un entier >= 0 | 606 s d'inactivite |
+| PASS | Get-IdleSeconds renvoie un entier >= 0 | 47 s d'inactivite |
 | PASS | Get-IsSessionLocked : LockApp -> verrouille, Code -> non | detection verrou OK |
 | PASS | Measure-ContextSwitches : compte les transitions (A,A,B,A -> 2) | 2 transitions |
 | PASS | Verrou PID : Set/Test/Remove (PID courant=actif, PID mort=inactif) | cycle verrou OK |
@@ -133,9 +133,9 @@
 | Statut | Cas d'usage | Detail |
 |:------:|-------------|--------|
 | PASS | Get-OrbMood : humeur selon session + garde | Idle/Focus/Overrun/Break/Ask/Resume OK |
-| PASS | Get-OrbVisual : humeur Resume distincte (appelle a reprendre) | Resume: vert, plus gros, pulse rapide |
+| PASS | Get-OrbVisual : humeur Resume distincte (appelle a reprendre) | Resume: or, plus gros, pulse rapide |
 | PASS | Get-OrbVisual : tailles Ask > Overrun > Focus > Idle + recentrage Ask | idle=92 focus=112 over=126 ask=420, recentre Ask |
-| PASS | Get-OrbVisual : Ask grossit avec l'intensite | 180 -> 420 |
+| PASS | Get-OrbVisual : Ask escalade avec l'intensite (plus gros, plus rapide, plus lumineux) | taille 180->420, pulse 760->420ms, lueur 40->74 |
 | PASS | Test-ProcessAllowed : liste, casse, AFOTRA tolere | non-liste bloque, casse OK, AFOTRA/powershell tolere |
 | PASS | Add-TaskTool : ajout + dedup (casse) + round-trip | 2 outils (Code, figma), dedup casse OK |
 | PASS | Add-TaskDigression : incremente le compteur | digressions=2 |

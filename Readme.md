@@ -3,7 +3,7 @@
 [![CI](https://github.com/codescooper/Afotra/actions/workflows/ci.yml/badge.svg)](https://github.com/codescooper/Afotra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Version:** 1.0  
+**Version:** 2.1  
 **Author/Maintainer:** CodeScooper  
 **License:** MIT  
 
@@ -29,7 +29,11 @@
 
 ## Description
 
-**AFOTRA - Awema Focus Tracker** is a local Windows application built in PowerShell and Windows Forms that monitors your PC activity in real-time. It detects which application is active, classifies your activities automatically, and generates detailed reports to help you understand your productivity patterns.
+**AFOTRA - Awema Focus Tracker** is a local Windows application built in PowerShell with a WPF dashboard. It monitors your PC activity in real time, classifies active windows automatically, manages work tasks/sessions, and generates detailed reports to help you understand your productivity patterns.
+
+The interface is a **dark, honey-yellow theme** with a **bee mascot** 🐝: dark `#222222`
+surfaces, `#FFC107` accents, metric tiles on the dashboard, and the floating assistant rendered
+as a small animated bee whose colour/size communicate your focus state at a glance.
 
 The application runs entirely locally on your machine with no external dependencies beyond what's already installed on Windows. Your data remains private and never leaves your computer.
 
@@ -54,14 +58,15 @@ The application runs entirely locally on your machine with no external dependenc
 - ✅ **Smart Classification**: Automatically categorizes activities based on process name or window title
 - ✅ **Daily CSV Logs**: Stores detailed activity history with timestamps and metadata
 - ✅ **Statistical Reports**: Generates focus scores, category breakdowns, and context switch metrics
-- ✅ **Windows Forms Dashboard**: User-friendly interface for control and monitoring
+- ✅ **WPF Dashboard**: dark themed interface for tracking, tasks, reports, and the assistant overlay
 - ✅ **Customizable Rules**: Add/modify classification rules without editing code
 - ✅ **Unknown Tracking**: Identifies and tracks unclassified activities for later review
 
 ### Dashboard Interface
-- **Live Tab**: Start/stop tracking, monitor current activity, generate reports
-- **Settings Tab**: Configure tracking intervals and goals
-- **About Tab**: View application information
+- **Dashboard Tab**: focus metrics, activity chart, task summary, and report generation
+- **Live Tracking Tab**: start/stop tracking and monitor current activity
+- **Unknown / Rules Tabs**: categorize unknown apps and manage classification rules
+- **Taches Tab**: task manager, sessions, Pomodoro controls, and task/session reports
 
 ### Logging & Reports
 - Precise timestamps with process ID and window title
@@ -75,16 +80,22 @@ The application runs entirely locally on your machine with no external dependenc
 ## Architecture
 
 ```
-Dashboard (dashboard.ps1)
-    ↓
+Dashboard (dashboard-wpf.ps1)
+    |
 Core Modules (./modules/)
-    • Tracker.Core.psm1     - Window detection & activity logging
-    • Rules.Core.psm1       - Rule management & classification
-    • Report.Core.psm1      - Report generation & analytics
-    ↓
-File System (logs folder)
-    • activity-YYYY-MM-DD.csv   - Daily activity records
-    • reports/summary-*.json     - Statistical breakdowns
+    - Tracker.Core.psm1       - Window detection & activity logging
+    - Rules.Core.psm1         - Rule management & classification
+    - Report.Core.psm1        - Daily report generation & analytics
+    - Tasks.Core.psm1         - Task storage and task queries
+    - Session.Core.psm1       - Timed sessions and Pomodoro state machine
+    - SessionReport.Core.psm1 - Session/task report aggregation
+    - Orb.Core.psm1           - Assistant visual language and focus guard rules
+    |
+File System
+    - logs/activity-YYYY-MM-DD.csv - Daily activity records
+    - logs/reports/summary-*.json  - Statistical breakdowns
+    - logs/reports/task-*.json/.md - Per-task session reports
+    - tasks.json                   - Local personal task store (gitignored)
 ```
 
 ---
@@ -137,14 +148,14 @@ cd "C:\AFOTRA - Awema Focus Tracker"
 ### Launch Dashboard
 ```powershell
 cd "C:\AFOTRA - Awema Focus Tracker"
-.\dashboard.ps1
+.\dashboard-wpf.ps1
 ```
 
-Or double-click `run-dashboard.vbs` in Windows Explorer.
+Or double-click `run-dashboard-wpf.bat` in Windows Explorer.
 
 ### Start Tracking
-1. Click the "▶ Start Tracking" button in the Live tab
-2. Status changes to green "Status: Running ⏱️"
+1. Click the "Start Tracking" button in the Live Tracking tab
+2. Status changes to "Status: Running"
 3. Activity logs to `logs/activity-2026-03-30.csv`
 
 ### Generate Report
@@ -213,9 +224,9 @@ Or double-click `run-dashboard.vbs` in Windows Explorer.
 ### Running the Tracker
 
 **From Dashboard:**
-1. Launch `dashboard.ps1`
-2. Click "▶ Start Tracking"
-3. Status shows: "Status: Running ⏱️ | Process: Code | Category: travail"
+1. Launch `dashboard-wpf.ps1`
+2. Click "Start Tracking"
+3. Status shows the active process and category in the sidebar/overlay.
 
 **Standalone (Headless):**
 ```powershell
@@ -425,12 +436,14 @@ task, the sphere **grows, reddens and moves into your way**, and asks *"is this 
 task?"*:
 
 - **Oui** — the app joins the task's tool list and the sphere calms down (it won't ask again for it).
-- **Non** — it nudges you to refocus and keeps the pressure on if you linger.
-- **Ignorer** — snooze it for the rest of the session.
+- **Non** — it does **not** calm down. The longer you stay off-task, and each time you say *Non*,
+  the sphere grows **bigger, redder and faster** — and after two refusals it starts sounding an
+  alarm. It keeps harassing until you actually go back to a task-related app.
+- **Ignorer** — snooze it for the rest of the session (the escape hatch).
 
-This way the assistant quietly builds the **list of what each task needs** and pushes back on
-everything else, so you re-center the moment you drift. It never closes or blocks your windows —
-the pressure is purely visual (a sound alarm is optional).
+Only **returning to a task app** calms it. This way the assistant builds the **list of what each
+task needs** and pushes back on everything else, so you re-center the moment you drift. It never
+closes or blocks your windows — the pressure is visual (and audible when you keep refusing).
 
 Configurable in `config.json`:
 
@@ -478,10 +491,10 @@ Check the Troubleshooting section above, then review log files if needed.
 
 **Maintained by:** CodeScooper  
 **Project:** AFOTRA - Awema Focus Tracker  
-**Version:** 1.0 (Stable)  
-**Last Updated:** March 30, 2026
+**Version:** 2.1  
+**Last Updated:** July 12, 2026
 
-Built with PowerShell and Windows Forms for simplicity and reliability.
+Built with PowerShell, WPF, and small testable core modules for local-first focus tracking.
 
 ---
 

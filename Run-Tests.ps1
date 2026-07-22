@@ -115,11 +115,13 @@ Write-Host "`n[5] Logging roundtrip" -ForegroundColor Yellow
 Check "Initialize + Write + read back a row" {
     $tmp = Join-Path $env:TEMP ("afotra_test_{0}.csv" -f (Get-Date -Format 'yyyyMMddHHmmss'))
     Initialize-LogFile -LogFile $tmp
-    Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ ProcessName="UnitTest"; ProcessId=1; WindowTitle="T"; Category="travail" }) -SampleSeconds 5
+    $title = 'T, "quoted"'
+    Write-ActivityLog -LogFile $tmp -ActivityInfo ([PSCustomObject]@{ ProcessName="UnitTest"; ProcessId=1; WindowTitle=$title; Category="travail" }) -SampleSeconds 5
     $rows = @(Import-Csv $tmp -Encoding UTF8)
     Remove-Item $tmp -ErrorAction SilentlyContinue
     Assert ($rows.Count -eq 1) "expected 1 data row, got $($rows.Count)"
     Assert ($rows[0].ProcessName -eq "UnitTest") "wrong process logged"
+    Assert ($rows[0].WindowTitle -eq $title) "window title was not CSV-escaped correctly"
     "1 row written & parsed"
 }
 

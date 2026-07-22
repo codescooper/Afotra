@@ -8,10 +8,41 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+trap {
+    try {
+        $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+        $dir = Join-Path $root "logs"
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $log = Join-Path $dir "dashboard-error.log"
+        $msg = @(
+            "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Fatal dashboard error"
+            $_.Exception.ToString()
+            "Invocation: $($_.InvocationInfo.PositionMessage)"
+            ""
+        ) -join [Environment]::NewLine
+        Add-Content -Path $log -Value $msg -Encoding UTF8
+        Write-Host ""
+        Write-Host "AFOTRA dashboard error. Details written to: $log" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Read-Host "Press Enter to close"
+    } catch { }
+    break
+}
+
 # This dashboard requires Windows + Desktop .NET (WPF)
 # $IsWindows only exists in PowerShell 6+; on Windows PowerShell 5.x we are always on Windows
 $isWindowsOS = if ($PSVersionTable.PSVersion.Major -ge 6) { $IsWindows } else { $true }
 if (-not $isWindowsOS) {
+# This dashboard requires Windows + Desktop .NET (WPF)
+# NOTE: $IsWindows does not exist in Windows PowerShell 5.1, so we need a compatible check.
+$isRunningOnWindows = $false
+if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
+    $isRunningOnWindows = [bool]$IsWindows
+} else {
+    $isRunningOnWindows = ($env:OS -eq "Windows_NT")
+}
+
+if (-not $isRunningOnWindows) {
     throw "AFOTRA dashboard-wpf.ps1 requires Windows (WPF is not available on this OS)."
 }
 
@@ -26,6 +57,7 @@ $scriptRoot = $PSScriptRoot
 $configPath = Join-Path $scriptRoot "config.json"
 $rulesPath = Join-Path $scriptRoot "rules.json"
 $logFolder = Join-Path $scriptRoot "logs"
+$dashboardLogPath = Join-Path $logFolder "dashboard-runtime.log"
 
 # Ensure logs folder exists
 if (!(Test-Path $logFolder)) {
@@ -48,7 +80,59 @@ try {
 } catch {
     [Windows.MessageBox]::Show("Error loading modules: $_", "AFOTRA Error") | Out-Null
     exit 1
+function Write-DashboardLog {
+    param(
+        [string]$Message,
+        [AllowNull()]
+        [object]$ErrorObject = $null
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $details = ""
+    if ($null -ne $ErrorObject) {
+        $exception = if ($ErrorObject -is [System.Management.Automation.ErrorRecord]) {
+            $ErrorObject.Exception
+        } elseif ($ErrorObject -is [System.Exception]) {
+            $ErrorObject
+        } else {
+            $null
+        }
+        $details = "`r`n$([string]$ErrorObject)"
+        if ($exception) { $details += "`r`n$($exception.ToString())" }
+        if ($ErrorObject -is [System.Management.Automation.ErrorRecord] -and $ErrorObject.ScriptStackTrace) {
+            $details += "`r`nPowerShell stack:`r`n$($ErrorObject.ScriptStackTrace)"
+        }
+    }
+    "[$timestamp] $Message$details" | Out-File -FilePath $dashboardLogPath -Append -Encoding UTF8
 }
+
+function Show-DashboardError {
+    param(
+        [string]$Message,
+        [AllowNull()]
+        [object]$ErrorObject = $null
+    )
+
+    Write-DashboardLog -Message $Message -ErrorObject $ErrorObject
+    [Windows.MessageBox]::Show("$Message`n`nDetails saved to:`n$dashboardLogPath", "AFOTRA Error") | Out-Null
+}
+
+[AppDomain]::CurrentDomain.add_UnhandledException({
+    param($sender, $eventArgs)
+    Write-DashboardLog -Message "Unhandled AppDomain exception" -ErrorObject $eventArgs.ExceptionObject
+})
+
+[System.Windows.Threading.Dispatcher]::CurrentDispatcher.add_UnhandledException({
+    param($sender, $eventArgs)
+    Write-DashboardLog -Message "Unhandled WPF dispatcher exception" -ErrorObject $eventArgs.Exception
+    [Windows.MessageBox]::Show("An unexpected dashboard error was handled.`n`nDetails saved to:`n$dashboardLogPath", "AFOTRA Error") | Out-Null
+    $eventArgs.Handled = $true
+})
+
+# Import modules
+Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
+Import-Module (Join-Path $scriptRoot "modules\Rules.Core.psm1") -Force
+Import-Module (Join-Path $scriptRoot "modules\Report.Core.psm1") -Force
 
 # Load configuration with fallback
 $config = $null
@@ -69,8 +153,22 @@ $rules = Load-Rules -RulesPath $rulesPath
 $global:config = $config
 $global:rules = $rules
 $global:logFolder = $logFolder
+$global:SessionCheckpointFile = Join-Path $global:logFolder "session-current.json"
 $global:rulesPath = $rulesPath
 $global:configPath = $configPath
+
+function Get-DashboardFocusCategories {
+    if ($global:config -and $global:config.focusCategories) {
+        return @($global:config.focusCategories)
+    }
+    return @("travail")
+}
+
+function Get-DashboardReportData {
+    $logFile = Get-TodayLogFile -LogFolder $global:logFolder
+    if (!(Test-Path $logFile)) { return $null }
+    return Get-ReportData -LogFile $logFile -FocusCategories (Get-DashboardFocusCategories)
+}
 
 # Global state
 $global:TrackerRunning = $false
@@ -79,6 +177,9 @@ $global:CurrentView = "DashboardView"
 $global:CurrentActivityStart = $null
 $global:CurrentActivityInfo = $null
 $global:CurrentLogFile = $null
+$global:LastSampleAt = $null
+$global:LoggedRowsToday = 0
+$global:SelectedTaskId = $null
 $global:DashboardUpdateTimer = $null
 $global:LastActivityGroup = $null
 $global:TrackerTimerEventSub = $null
@@ -103,6 +204,14 @@ $global:PomodoroConfig = Get-PomodoroConfig ($config.pomodoro)
 $global:PomodoroSound  = if ($config.pomodoro -and $null -ne $config.pomodoro.sound) { [bool]$config.pomodoro.sound } else { $true }
 $global:SessionState = $null     # Session.Core state hashtable, or $null when idle
 $global:SessionTimer = $null     # 1s DispatcherTimer driving the live session
+$global:SessionReadout = $null   # last 1s readout; dashboard/overlay/orb share it
+$global:SessionDisplayText = "--:--"
+$global:SessionDisplayBrush = "#9CA3AF"
+$global:SessionMilestonesFired = @{}
+$global:SessionPomodoroSuggestionsFired = @{}
+$global:OrbMilestonePopup = $null
+$global:OrbMilestoneText = $null
+$global:OrbMilestoneTimer = $null
 # Assistant orb + focus-guard state
 $asst = $config.assistant
 $global:AsstOrbEnabled  = if ($asst -and $null -ne $asst.orbEnabled)  { [bool]$asst.orbEnabled }  else { $true }
@@ -121,158 +230,322 @@ $global:GuardSnooze = @()        # per-session "Ignorer" set
 $global:GuardAsking = $null      # process currently being questioned
 $global:GuardAskStart = $null
 $global:GuardCooldownUntil = $null
+$global:GuardOffTaskSince = $null  # start of the current off-task streak (drives escalation)
+$global:GuardNonCount = 0          # times "Non" was pressed this streak (bumps escalation + sound)
+$global:GuardReaskAt = $null       # after "Non", when to pop the question again
 
 # XAML for the main window
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="AFOTRA - Awema Focus Tracker v2.0" Height="900" Width="1400"
-        WindowStartupLocation="CenterScreen" Background="#F5F7FA">
+        Title="AFOTRA - Awema Focus Tracker v2.0" Height="760" Width="1180" MinHeight="620" MinWidth="960" SizeToContent="Manual"
+        WindowStartupLocation="CenterScreen" Background="#222222">
     <Window.Resources>
-        <SolidColorBrush x:Key="PrimaryBrush" Color="#2563EB"/>
-        <SolidColorBrush x:Key="SecondaryBrush" Color="#64748B"/>
+        <SolidColorBrush x:Key="PrimaryBrush" Color="#FFC107"/>
+        <SolidColorBrush x:Key="SecondaryBrush" Color="#3A3A3A"/>
         <SolidColorBrush x:Key="SuccessBrush" Color="#10B981"/>
         <SolidColorBrush x:Key="WarningBrush" Color="#F59E0B"/>
         <SolidColorBrush x:Key="DangerBrush" Color="#EF4444"/>
-        <SolidColorBrush x:Key="CardBackground" Color="#FFFFFF"/>
-        <SolidColorBrush x:Key="TextPrimary" Color="#1F2937"/>
-        <SolidColorBrush x:Key="TextSecondary" Color="#6B7280"/>
-        <Style x:Key="CardStyle" TargetType="Border">
-            <Setter Property="Background" Value="#FFFFFF"/>
-            <Setter Property="CornerRadius" Value="8"/>
-            <Setter Property="BorderBrush" Value="#E5E7EB"/>
-            <Setter Property="BorderThickness" Value="1"/>
-        </Style>
-        <Style x:Key="PrimaryButtonStyle" TargetType="Button">
-            <Setter Property="Background" Value="#2563EB"/>
-            <Setter Property="Foreground" Value="White"/>
+        <SolidColorBrush x:Key="CardBackground" Color="#2B2B2B"/>
+        <SolidColorBrush x:Key="TextPrimary" Color="#F5F5F5"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#9A9A9A"/>
+        <Style TargetType="Button">
+            <Setter Property="Foreground" Value="#F5F5F5"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="FontSize" Value="13"/>
-            <Setter Property="Padding" Value="12,8"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonChrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}" CornerRadius="3">
+                            <ContentPresenter x:Name="ButtonContent" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonChrome" Property="Opacity" Value="0.88"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonChrome" Property="Opacity" Value="0.74"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonChrome" Property="Background" Value="#3A3A3A"/>
+                                <Setter TargetName="ButtonChrome" Property="BorderBrush" Value="#4A4A4A"/>
+                                <Setter TargetName="ButtonContent" Property="TextElement.Foreground" Value="#8F8F8F"/>
+                                <Setter TargetName="ButtonChrome" Property="Opacity" Value="1"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="MinWidth" Value="8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid x:Name="Root" Width="8" Background="Transparent">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" IsHitTestVisible="False"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb x:Name="Thumb" Background="#6B5B2A" MinHeight="38">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border x:Name="ThumbChrome" Width="6" Margin="1,3" CornerRadius="3" Background="{TemplateBinding Background}"/>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="ThumbChrome" Property="Background" Value="#FFC107"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsDragging" Value="True">
+                                                        <Setter TargetName="ThumbChrome" Property="Background" Value="#FFD54F"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" IsHitTestVisible="False"/>
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Orientation" Value="Horizontal">
+                                <Setter TargetName="Root" Property="Width" Value="Auto"/>
+                                <Setter TargetName="Root" Property="Height" Value="8"/>
+                                <Setter Property="Height" Value="8"/>
+                                <Setter Property="MinHeight" Value="8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="#2B2B2B"/>
+            <Setter Property="Foreground" Value="#F5F5F5"/>
+            <Setter Property="BorderBrush" Value="#383838"/>
+            <Setter Property="RowBackground" Value="#2B2B2B"/>
+            <Setter Property="AlternatingRowBackground" Value="#262626"/>
+            <Setter Property="GridLinesVisibility" Value="None"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="SelectionMode" Value="Single"/>
+            <Setter Property="SelectionUnit" Value="FullRow"/>
+        </Style>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#1F1F1F"/>
+            <Setter Property="Foreground" Value="#FFC107"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+        </Style>
+        <Style TargetType="DataGridCell">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#F5F5F5"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="6,4"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="Transparent"/>
+                    <Setter Property="Foreground" Value="#1A1A1A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="DataGridRow">
+            <Setter Property="Background" Value="#2B2B2B"/>
+            <Setter Property="Foreground" Value="#F5F5F5"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#353535"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#FFC107"/>
+                    <Setter Property="Foreground" Value="#1A1A1A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#333333"/>
+            <Setter Property="Foreground" Value="#F5F5F5"/>
+            <Setter Property="BorderBrush" Value="#4A4A4A"/>
+            <Setter Property="CaretBrush" Value="#FFC107"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style TargetType="ListBox">
+            <Setter Property="Background" Value="#2B2B2B"/>
+            <Setter Property="Foreground" Value="#F5F5F5"/>
+            <Setter Property="BorderBrush" Value="#383838"/>
         </Style>
     </Window.Resources>
     <Grid>
         <!-- Sidebar Navigation -->
-        <Border Background="#2563EB" Width="260" HorizontalAlignment="Left">
-            <StackPanel Margin="20">
-                <TextBlock Text="AFOTRA" FontSize="26" FontWeight="Bold" Foreground="White" Margin="0,0,0,10"/>
-                <TextBlock Text="Focus Tracker" FontSize="12" Foreground="#E0EFFE" Margin="0,0,0,30" TextAlignment="Center"/>
-                
-                <Button x:Name="NavDashboard" Content="Dashboard" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
-                <Button x:Name="NavLiveTracking" Content="Live Tracking" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
-                <Button x:Name="NavUnknownActivities" Content="Unknown" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
-                <Button x:Name="NavRulesCategories" Content="Rules" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,8"/>
-                <Button x:Name="NavTasks" Content="Tâches" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,30"/>
-                
-                <Separator Background="#4B5563" Margin="0,0,0,20"/>
-                
-                <Button x:Name="BtnStartStop" Content="Start Tracking" Background="#10B981" Foreground="White" FontWeight="Bold" FontSize="14" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,12" Height="42"/>
-                <TextBlock x:Name="StatusText" Text="Status: Stopped" Foreground="White" Margin="0,10,0,0" FontSize="11" TextAlignment="Center" FontWeight="SemiBold"/>
-                <TextBlock x:Name="CurrentProcessText" Text="Process: --" Foreground="#E0EFFE" Margin="0,15,0,0" FontSize="10" TextWrapping="Wrap"/>
-                <Button x:Name="BtnToggleOverlay" Content="Afficher Overlay" Background="#374151" Foreground="White" FontWeight="SemiBold" FontSize="11" Padding="12,6" BorderThickness="0" Cursor="Hand" Margin="0,12,0,0"/>
+        <Border Background="#1A1A1A" Width="260" HorizontalAlignment="Left">
+            <StackPanel Margin="18">
+                <!-- Bee logo + wordmark -->
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                    <Viewbox Width="46" Height="42" VerticalAlignment="Center">
+                        <Grid Width="46" Height="42">
+                            <Ellipse Width="18" Height="14" Fill="#66FFFFFF" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="3,2,0,0"/>
+                            <Ellipse Width="18" Height="14" Fill="#66FFFFFF" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,2,3,0"/>
+                            <Ellipse Width="16" Height="14" Fill="#141414" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,0,0,0"/>
+                            <Border Width="26" Height="30" CornerRadius="13" Background="#FFC107" VerticalAlignment="Bottom" HorizontalAlignment="Center" ClipToBounds="True">
+                                <StackPanel VerticalAlignment="Center">
+                                    <Rectangle Height="4" Fill="#141414" Margin="0,2,0,0"/>
+                                    <Rectangle Height="4" Fill="#141414" Margin="0,3,0,0"/>
+                                    <Rectangle Height="4" Fill="#141414" Margin="0,3,0,0"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Viewbox>
+                    <StackPanel VerticalAlignment="Center" Margin="10,0,0,0">
+                        <TextBlock Text="AFOTRA" FontSize="22" FontWeight="Bold" Foreground="#FFC107"/>
+                        <TextBlock Text="Focus Tracker" FontSize="10" Foreground="#8A8A8A"/>
+                    </StackPanel>
+                </StackPanel>
+                <Separator Background="#2E2E2E" Margin="0,16,0,16"/>
+
+                <Button x:Name="NavDashboard" Content="Dashboard" Background="#1A1A1A" Foreground="#CFCFCF" FontWeight="SemiBold" FontSize="13" Padding="12,9" BorderThickness="0" Cursor="Hand" Margin="0,0,0,6" HorizontalContentAlignment="Left"/>
+                <Button x:Name="NavLiveTracking" Content="Live Tracking" Background="#1A1A1A" Foreground="#CFCFCF" FontWeight="SemiBold" FontSize="13" Padding="12,9" BorderThickness="0" Cursor="Hand" Margin="0,0,0,6" HorizontalContentAlignment="Left"/>
+                <Button x:Name="NavUnknownActivities" Content="Unknown" Background="#1A1A1A" Foreground="#CFCFCF" FontWeight="SemiBold" FontSize="13" Padding="12,9" BorderThickness="0" Cursor="Hand" Margin="0,0,0,6" HorizontalContentAlignment="Left"/>
+                <Button x:Name="NavRulesCategories" Content="Rules" Background="#1A1A1A" Foreground="#CFCFCF" FontWeight="SemiBold" FontSize="13" Padding="12,9" BorderThickness="0" Cursor="Hand" Margin="0,0,0,6" HorizontalContentAlignment="Left"/>
+                <Button x:Name="NavTasks" Content="Tâches" Background="#1A1A1A" Foreground="#CFCFCF" FontWeight="SemiBold" FontSize="13" Padding="12,9" BorderThickness="0" Cursor="Hand" Margin="0,0,0,24" HorizontalContentAlignment="Left"/>
+
+                <Separator Background="#2E2E2E" Margin="0,0,0,18"/>
+
+                <Button x:Name="BtnStartStop" Content="Start Tracking" Background="#FFC107" Foreground="#1A1A1A" FontWeight="Bold" FontSize="14" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,0,12" Height="42"/>
+                <TextBlock x:Name="StatusText" Text="Status: Stopped" Foreground="#CFCFCF" Margin="0,6,0,0" FontSize="11" TextAlignment="Center" FontWeight="SemiBold"/>
+                <TextBlock x:Name="CurrentProcessText" Text="Process: --" Foreground="#8A8A8A" Margin="0,12,0,0" FontSize="10" TextWrapping="Wrap"/>
+                <Button x:Name="BtnToggleOverlay" Content="Afficher Overlay" Background="#333333" Foreground="#E5E5E5" FontWeight="SemiBold" FontSize="11" Padding="12,6" BorderThickness="0" Cursor="Hand" Margin="0,12,0,0"/>
             </StackPanel>
         </Border>
 
         <!-- Main Content Area -->
-        <ScrollViewer Margin="280,20,20,20" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="MainContent" Margin="0,0,0,20">
+        <Grid Margin="260,0,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <!-- Top bar -->
+            <Border Grid.Row="0" Background="#222222" Padding="24,16,24,10">
+                <Grid>
+                    <TextBlock Text="🐝 Awema Focus Tracker" FontSize="14" FontWeight="SemiBold" Foreground="#8A8A8A" VerticalAlignment="Center"/>
+                    <Border HorizontalAlignment="Right" Background="#333333" CornerRadius="18" Padding="14,7" Width="280">
+                        <Grid>
+                            <TextBlock Text="🔍  Rechercher une tâche..." Foreground="#7A7A7A" FontSize="12" VerticalAlignment="Center" x:Name="SearchPlaceholder"/>
+                            <TextBox x:Name="GlobalSearchBox" Background="Transparent" BorderThickness="0" Foreground="#F5F5F5" FontSize="12" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+            <ScrollViewer Grid.Row="1" Margin="24,4,24,20" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="MainContent" Margin="0,0,0,20">
                 
                 <!-- Dashboard View -->
                 <StackPanel x:Name="DashboardView" Visibility="Visible">
-                    <TextBlock Text="Dashboard" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
-                    
-                    <!-- Stats Cards Grid -->
+                    <TextBlock Text="Dashboard" FontSize="30" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,4,0,20"/>
+
+                    <!-- Metric tiles -->
                     <Grid Margin="0,0,0,20">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/>
                         </Grid.ColumnDefinitions>
-                        <Border Grid.Column="0" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
-                            <StackPanel Margin="15">
-                                <TextBlock Text="Total Time" FontSize="12" Foreground="#6B7280"/>
-                                <TextBlock x:Name="TotalTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#1F2937" Margin="0,5,0,0"/>
+                        <Border Grid.Column="0" Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,12,0">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="⏱  Temps total" FontSize="12" Foreground="#9A9A9A"/>
+                                <TextBlock x:Name="TotalTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,8,0,10"/>
+                                <Border Height="4" CornerRadius="2" Background="#FFC107"/>
                             </StackPanel>
                         </Border>
-                        <Border Grid.Column="1" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
-                            <StackPanel Margin="15">
-                                <TextBlock Text="Focus Time" FontSize="12" Foreground="#6B7280"/>
-                                <TextBlock x:Name="FocusTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#10B981" Margin="0,5,0,0"/>
+                        <Border Grid.Column="1" Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,12,0">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="🍯  Focus" FontSize="12" Foreground="#9A9A9A"/>
+                                <TextBlock x:Name="FocusTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#34D399" Margin="0,8,0,10"/>
+                                <Border Height="4" CornerRadius="2" Background="#34D399"/>
                             </StackPanel>
                         </Border>
-                        <Border Grid.Column="2" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
-                            <StackPanel Margin="15">
-                                <TextBlock Text="Focus Score" FontSize="12" Foreground="#6B7280"/>
-                                <TextBlock x:Name="FocusScoreText" Text="0%" FontSize="26" FontWeight="Bold" Foreground="#2563EB" Margin="0,5,0,0"/>
+                        <Border Grid.Column="2" Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,12,0">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="🎯  Score focus" FontSize="12" Foreground="#9A9A9A"/>
+                                <TextBlock x:Name="FocusScoreText" Text="0%" FontSize="26" FontWeight="Bold" Foreground="#FFC107" Margin="0,8,0,10"/>
+                                <Border Height="4" CornerRadius="2" Background="#FFC107"/>
                             </StackPanel>
                         </Border>
-                        <Border Grid.Column="3" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
-                            <StackPanel Margin="15">
-                                <TextBlock Text="Distractions" FontSize="12" Foreground="#6B7280"/>
-                                <TextBlock x:Name="DistractionTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#EF4444" Margin="0,5,0,0"/>
+                        <Border Grid.Column="3" Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="⚠  Distractions" FontSize="12" Foreground="#9A9A9A"/>
+                                <TextBlock x:Name="DistractionTimeText" Text="00:00:00" FontSize="26" FontWeight="Bold" Foreground="#F87171" Margin="0,8,0,10"/>
+                                <Border Height="4" CornerRadius="2" Background="#EF4444"/>
                             </StackPanel>
                         </Border>
                     </Grid>
 
                     <!-- Charts Section -->
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,0,20">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Activity Distribution" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
-                            <Canvas x:Name="ActivityChartCanvas" Width="1000" Height="280" Background="#F9FAFB"/>
+                            <TextBlock Text="Répartition de l'activité" FontSize="18" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,15"/>
+                            <Canvas x:Name="ActivityChartCanvas" Height="260" MinWidth="620" Background="#232323" HorizontalAlignment="Stretch"/>
                         </StackPanel>
                     </Border>
-                    
-                    <!-- Quick Actions -->
+
                     <!-- Tasks summary card -->
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,0,20">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Tâches" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,12"/>
-                            <StackPanel Orientation="Horizontal">
-                                <StackPanel Margin="0,0,30,0"><TextBlock Text="À faire" FontSize="11" Foreground="#6B7280"/><TextBlock x:Name="TaskCountAFaire" Text="0" FontSize="22" FontWeight="Bold" Foreground="#2563EB"/></StackPanel>
-                                <StackPanel Margin="0,0,30,0"><TextBlock Text="En cours" FontSize="11" Foreground="#6B7280"/><TextBlock x:Name="TaskCountEnCours" Text="0" FontSize="22" FontWeight="Bold" Foreground="#F59E0B"/></StackPanel>
-                                <StackPanel Margin="0,0,30,0"><TextBlock Text="Terminées auj." FontSize="11" Foreground="#6B7280"/><TextBlock x:Name="TaskCountTermine" Text="0" FontSize="22" FontWeight="Bold" Foreground="#10B981"/></StackPanel>
-                                <StackPanel Margin="0,0,30,0"><TextBlock Text="En retard" FontSize="11" Foreground="#6B7280"/><TextBlock x:Name="TaskCountRetard" Text="0" FontSize="22" FontWeight="Bold" Foreground="#EF4444"/></StackPanel>
-                            </StackPanel>
+                            <TextBlock Text="🐝 Tâches" FontSize="16" FontWeight="Bold" Foreground="#FFC107" Margin="0,0,0,12"/>
+                            <WrapPanel>
+                                <StackPanel Margin="0,0,40,0"><TextBlock Text="À faire" FontSize="11" Foreground="#9A9A9A"/><TextBlock x:Name="TaskCountAFaire" Text="0" FontSize="22" FontWeight="Bold" Foreground="#FFC107"/></StackPanel>
+                                <StackPanel Margin="0,0,40,0"><TextBlock Text="En cours" FontSize="11" Foreground="#9A9A9A"/><TextBlock x:Name="TaskCountEnCours" Text="0" FontSize="22" FontWeight="Bold" Foreground="#F59E0B"/></StackPanel>
+                                <StackPanel Margin="0,0,40,0"><TextBlock Text="Terminées auj." FontSize="11" Foreground="#9A9A9A"/><TextBlock x:Name="TaskCountTermine" Text="0" FontSize="22" FontWeight="Bold" Foreground="#34D399"/></StackPanel>
+                                <StackPanel Margin="0,0,40,0"><TextBlock Text="En retard" FontSize="11" Foreground="#9A9A9A"/><TextBlock x:Name="TaskCountRetard" Text="0" FontSize="22" FontWeight="Bold" Foreground="#F87171"/></StackPanel>
+                            </WrapPanel>
                         </StackPanel>
                     </Border>
 
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
-                        <Button x:Name="BtnGenerateReport" Content="Generate Report" Background="#3B82F6" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,10,0"/>
-                        <Button x:Name="BtnOpenLogs" Content="Open Logs" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
+                        <Button x:Name="BtnGenerateReport" Content="Générer un rapport" Background="#FFC107" Foreground="#1A1A1A" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,10,0"/>
+                        <Button x:Name="BtnOpenLogs" Content="Ouvrir les logs" Background="#3A3A3A" Foreground="#E5E5E5" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
                     </StackPanel>
                 </StackPanel>
 
                 <!-- Live Tracking View -->
                 <StackPanel x:Name="LiveTrackingView" Visibility="Collapsed">
-                    <TextBlock Text="Live Tracking" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
+                    <TextBlock Text="Live Tracking" FontSize="32" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,20"/>
                     
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,0,20">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Current Activity" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
+                            <TextBlock Text="Current Activity" FontSize="18" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,15"/>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/><ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Margin="0,0,20,0">
-                                    <TextBlock Text="Process:" FontWeight="SemiBold" Foreground="#6B7280"/>
-                                    <TextBlock x:Name="LiveProcessText" Text="--" FontSize="16" Margin="0,5,0,10" Foreground="#1F2937" FontFamily="Consolas"/>
-                                    <TextBlock Text="Window Title:" FontWeight="SemiBold" Foreground="#6B7280"/>
-                                    <TextBlock x:Name="LiveWindowText" Text="--" FontSize="13" Margin="0,5,0,10" TextWrapping="Wrap" Foreground="#1F2937"/>
+                                    <TextBlock Text="Process:" FontWeight="SemiBold" Foreground="#9A9A9A"/>
+                                    <TextBlock x:Name="LiveProcessText" Text="--" FontSize="16" Margin="0,5,0,10" Foreground="#F5F5F5" FontFamily="Consolas"/>
+                                    <TextBlock Text="Window Title:" FontWeight="SemiBold" Foreground="#9A9A9A"/>
+                                    <TextBlock x:Name="LiveWindowText" Text="--" FontSize="13" Margin="0,5,0,10" TextWrapping="Wrap" Foreground="#F5F5F5"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Category:" FontWeight="SemiBold" Foreground="#6B7280"/>
+                                    <TextBlock Text="Category:" FontWeight="SemiBold" Foreground="#9A9A9A"/>
                                     <TextBlock x:Name="LiveCategoryText" Text="--" FontSize="16" Margin="0,5,0,10" Foreground="#10B981" FontWeight="Bold"/>
-                                    <TextBlock Text="Duration:" FontWeight="SemiBold" Foreground="#6B7280"/>
-                                    <TextBlock x:Name="LiveCurrentTimeText" Text="00:00:00" FontSize="16" Margin="0,5,0,10" Foreground="#1F2937" FontFamily="Consolas" FontWeight="Bold"/>
+                                    <TextBlock Text="Duration:" FontWeight="SemiBold" Foreground="#9A9A9A"/>
+                                    <TextBlock x:Name="LiveCurrentTimeText" Text="00:00:00" FontSize="16" Margin="0,5,0,10" Foreground="#F5F5F5" FontFamily="Consolas" FontWeight="Bold"/>
+                                    <TextBlock Text="Dernier échantillon:" FontWeight="SemiBold" Foreground="#9A9A9A"/>
+                                    <TextBlock x:Name="LiveSampleText" Text="--" FontSize="13" Margin="0,5,0,10" Foreground="#FFC107" FontFamily="Consolas"/>
+                                    <TextBlock Text="Échantillons aujourd'hui:" FontWeight="SemiBold" Foreground="#9A9A9A"/>
+                                    <TextBlock x:Name="LiveLogCountText" Text="0" FontSize="13" Margin="0,5,0,0" Foreground="#F5F5F5" FontFamily="Consolas"/>
                                 </StackPanel>
                             </Grid>
+                            <TextBlock x:Name="LiveLogFileText" Text="Log: --" FontSize="11" Foreground="#9A9A9A" TextWrapping="Wrap" Margin="0,12,0,0"/>
                         </StackPanel>
                     </Border>
                     
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Last 10 Activities" FontSize="18" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
-                            <DataGrid x:Name="RecentActivitiesGrid" Height="280" AutoGenerateColumns="False" IsReadOnly="True" Background="White">
+                            <TextBlock Text="Last 10 Activities" FontSize="18" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,15"/>
+                            <DataGrid x:Name="RecentActivitiesGrid" Height="280" AutoGenerateColumns="False" IsReadOnly="True" Background="#2B2B2B">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="70"/>
                                     <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="100"/>
@@ -286,12 +559,12 @@ $xaml = @"
 
                 <!-- Unknown Activities View -->
                 <StackPanel x:Name="UnknownActivitiesView" Visibility="Collapsed">
-                    <TextBlock Text="Unknown Activities" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
+                    <TextBlock Text="Unknown Activities" FontSize="32" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,20"/>
                     
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Categorize unclassified activities to improve tracking" FontSize="14" Foreground="#6B7280" Margin="0,0,0,15"/>
-                            <DataGrid x:Name="UnknownActivitiesGrid" Height="350" AutoGenerateColumns="False" IsReadOnly="True" Background="White" CanUserAddRows="False">
+                            <TextBlock Text="Categorize unclassified activities to improve tracking" FontSize="14" Foreground="#9A9A9A" Margin="0,0,0,15"/>
+                            <DataGrid x:Name="UnknownActivitiesGrid" Height="350" AutoGenerateColumns="False" IsReadOnly="True" Background="#2B2B2B" CanUserAddRows="False">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Process" Binding="{Binding ProcessName}" Width="150"/>
                                     <DataGridTextColumn Header="Window Title" Binding="{Binding WindowTitle}" Width="*"/>
@@ -299,38 +572,38 @@ $xaml = @"
                                     <DataGridTextColumn Header="Total Time" Binding="{Binding TotalTime}" Width="100"/>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
+                            <WrapPanel Margin="0,15,0,0">
                                 <Button x:Name="BtnCategorizeUnknown" Content="Categorize Selected" Background="#10B981" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,10,0"/>
                                 <Button x:Name="BtnRefreshUnknown" Content="Refresh" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
-                            </StackPanel>
+                            </WrapPanel>
                         </StackPanel>
                     </Border>
                 </StackPanel>
 
                 <!-- Rules & Categories View -->
                 <StackPanel x:Name="RulesCategoriesView" Visibility="Collapsed">
-                    <TextBlock Text="Rules &amp; Categories" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
+                    <TextBlock Text="Rules &amp; Categories" FontSize="32" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,20"/>
                     
                     <Grid Margin="0,0,0,20">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="1*"/><ColumnDefinition Width="1*"/>
                         </Grid.ColumnDefinitions>
                         
-                        <Border Grid.Column="0" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,10,0">
+                        <Border Grid.Column="0" Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,10,0">
                             <StackPanel Margin="20">
-                                <TextBlock Text="Categories" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
-                                <ListBox x:Name="CategoriesListBox" Height="150" Background="White" FontSize="13"/>
+                                <TextBlock Text="Categories" FontSize="16" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,15"/>
+                                <ListBox x:Name="CategoriesListBox" Height="150" Background="#2B2B2B" FontSize="13"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,15,0,0">
-                                    <TextBox x:Name="NewCategoryTextBox" Width="240" Padding="8" Margin="0,0,10,0" Background="White"/>
+                                    <TextBox x:Name="NewCategoryTextBox" Width="240" Padding="8" Margin="0,0,10,0" Background="#2B2B2B"/>
                                     <Button x:Name="BtnAddCategory" Content="Add" Background="#2563EB" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Width="90"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
                         
-                        <Border Grid.Column="1" Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
+                        <Border Grid.Column="1" Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1">
                             <StackPanel Margin="20">
-                                <TextBlock Text="Process Rules" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,15"/>
-                                <DataGrid x:Name="ProcessRulesGrid" Height="150" AutoGenerateColumns="False" Background="White" CanUserAddRows="False">
+                                <TextBlock Text="Process Rules" FontSize="16" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,15"/>
+                                <DataGrid x:Name="ProcessRulesGrid" Height="150" AutoGenerateColumns="False" Background="#2B2B2B" CanUserAddRows="False">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*"/>
                                         <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="120"/>
@@ -345,13 +618,13 @@ $xaml = @"
                     </Grid>
 
                     <!-- Chrome History Analysis -->
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,20">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,0,20">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Analyse Historique Chrome" FontSize="16" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,8"/>
-                            <TextBlock Text="Détecte les domaines les plus visités et crée des règles automatiquement." FontSize="12" Foreground="#6B7280" Margin="0,0,0,12"/>
+                            <TextBlock Text="Analyse Historique Chrome" FontSize="16" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,8"/>
+                            <TextBlock Text="Détecte les domaines les plus visités et crée des règles automatiquement." FontSize="12" Foreground="#9A9A9A" Margin="0,0,0,12"/>
                             <StackPanel Orientation="Horizontal">
                                 <Button x:Name="BtnAnalyzeChrome" Content="Analyser Chrome" Background="#EA580C" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
-                                <TextBlock x:Name="ChromeStatusText" Text="" Foreground="#6B7280" FontSize="12" Margin="15,0,0,0" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="ChromeStatusText" Text="" Foreground="#9A9A9A" FontSize="12" Margin="15,0,0,0" VerticalAlignment="Center"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -359,48 +632,48 @@ $xaml = @"
 
                 <!-- ===== TASKS VIEW ===== -->
                 <StackPanel x:Name="TasksView" Visibility="Collapsed">
-                    <TextBlock Text="Tâches" FontSize="32" FontWeight="Bold" Foreground="#1F2937" Margin="0,0,0,20"/>
+                    <TextBlock Text="Tâches" FontSize="32" FontWeight="Bold" Foreground="#F5F5F5" Margin="0,0,0,20"/>
 
                     <!-- Session panel (Pomodoro) -->
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,15">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,0,15">
                         <Grid Margin="20">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Margin="0,0,30,0" VerticalAlignment="Center">
-                                <TextBlock Text="SESSION" FontSize="12" FontWeight="Bold" Foreground="#6B7280"/>
+                                <TextBlock Text="SESSION" FontSize="12" FontWeight="Bold" Foreground="#9A9A9A"/>
                                 <TextBlock x:Name="SessionCountdown" Text="--:--" FontSize="46" FontWeight="Bold" Foreground="#9CA3AF" FontFamily="Consolas"/>
-                                <TextBlock x:Name="SessionPomText" Text="" FontSize="12" Foreground="#6B7280"/>
+                                <TextBlock x:Name="SessionPomText" Text="" FontSize="12" Foreground="#9A9A9A"/>
                             </StackPanel>
                             <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock x:Name="SessionTaskText" Text="Aucune session active" FontSize="15" FontWeight="SemiBold" Foreground="#1F2937" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                <TextBlock x:Name="SessionTaskText" Text="Aucune session active" FontSize="15" FontWeight="SemiBold" Foreground="#F5F5F5" TextWrapping="Wrap" Margin="0,0,0,8"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                    <TextBlock Text="Travail " FontSize="12" Foreground="#6B7280"/><TextBlock x:Name="SessionWorkText" Text="00:00:00" FontSize="12" Foreground="#1F2937" FontFamily="Consolas" Margin="0,0,16,0"/>
-                                    <TextBlock Text="Global " FontSize="12" Foreground="#6B7280"/><TextBlock x:Name="SessionGlobalText" Text="00:00:00" FontSize="12" Foreground="#1F2937" FontFamily="Consolas" Margin="0,0,16,0"/>
-                                    <TextBlock Text="Pause " FontSize="12" Foreground="#6B7280"/><TextBlock x:Name="SessionPauseText" Text="00:00:00" FontSize="12" Foreground="#1F2937" FontFamily="Consolas"/>
+                                    <TextBlock Text="Travail " FontSize="12" Foreground="#9A9A9A"/><TextBlock x:Name="SessionWorkText" Text="00:00:00" FontSize="12" Foreground="#F5F5F5" FontFamily="Consolas" Margin="0,0,16,0"/>
+                                    <TextBlock Text="Global " FontSize="12" Foreground="#9A9A9A"/><TextBlock x:Name="SessionGlobalText" Text="00:00:00" FontSize="12" Foreground="#F5F5F5" FontFamily="Consolas" Margin="0,0,16,0"/>
+                                    <TextBlock Text="Pause " FontSize="12" Foreground="#9A9A9A"/><TextBlock x:Name="SessionPauseText" Text="00:00:00" FontSize="12" Foreground="#F5F5F5" FontFamily="Consolas"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                    <TextBlock Text="Estimé (min):" FontSize="12" Foreground="#6B7280" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                    <TextBox x:Name="SessionEstimeInput" Width="60" Padding="4,3" Text="25" Background="White"/>
+                                    <TextBlock Text="Estimé (min):" FontSize="12" Foreground="#9A9A9A" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="SessionEstimeInput" Width="60" Padding="4,3" Text="25" Background="#2B2B2B"/>
                                 </StackPanel>
-                                <StackPanel Orientation="Horizontal">
+                                <WrapPanel>
                                     <Button x:Name="BtnSessStart" Content="Démarrer" Background="#10B981" Foreground="White" FontWeight="SemiBold" FontSize="12" Padding="10,6" BorderThickness="0" Cursor="Hand" Margin="0,0,6,0"/>
                                     <Button x:Name="BtnSessPause" Content="Pause" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="12" Padding="10,6" BorderThickness="0" Cursor="Hand" Margin="0,0,6,0"/>
                                     <Button x:Name="BtnSessResume" Content="Reprendre" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="12" Padding="10,6" BorderThickness="0" Cursor="Hand" Margin="0,0,6,0"/>
                                     <Button x:Name="BtnSessBreak" Content="Pause Pomodoro" Background="#8B5CF6" Foreground="White" FontWeight="SemiBold" FontSize="12" Padding="10,6" BorderThickness="0" Cursor="Hand" Margin="0,0,6,0"/>
                                     <Button x:Name="BtnSessComplete" Content="Terminer la tâche" Background="#2563EB" Foreground="White" FontWeight="SemiBold" FontSize="12" Padding="10,6" BorderThickness="0" Cursor="Hand" Margin="0,0,6,0"/>
                                     <Button x:Name="BtnSessStop" Content="Arrêter" Background="#EF4444" Foreground="White" FontWeight="SemiBold" FontSize="12" Padding="10,6" BorderThickness="0" Cursor="Hand"/>
-                                </StackPanel>
+                                </WrapPanel>
                             </StackPanel>
                         </Grid>
                     </Border>
 
                     <!-- Toolbar: search + quick filters -->
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1" Margin="0,0,0,15">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1" Margin="0,0,0,15">
                         <StackPanel Margin="20">
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                                <TextBox x:Name="TaskSearchBox" Width="320" Padding="8" Margin="0,0,10,0" Background="White"/>
+                                <TextBox x:Name="TaskSearchBox" Width="320" Padding="8" Margin="0,0,10,0" Background="#2B2B2B"/>
                                 <Button x:Name="BtnTaskSearch" Content="Rechercher" Background="#2563EB" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand" Margin="0,0,6,0"/>
                                 <Button x:Name="BtnTaskSearchClear" Content="Effacer" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
                             </StackPanel>
@@ -415,9 +688,9 @@ $xaml = @"
                     </Border>
 
                     <!-- Task list + actions -->
-                    <Border Background="#FFFFFF" CornerRadius="8" BorderBrush="#E5E7EB" BorderThickness="1">
+                    <Border Background="#2B2B2B" CornerRadius="10" BorderBrush="#383838" BorderThickness="1">
                         <StackPanel Margin="20">
-                            <DataGrid x:Name="TasksGrid" Height="360" AutoGenerateColumns="False" IsReadOnly="True" Background="White" CanUserAddRows="False" SelectionMode="Single" GridLinesVisibility="Horizontal" HeadersVisibility="Column">
+                            <DataGrid x:Name="TasksGrid" Height="360" AutoGenerateColumns="False" IsReadOnly="True" Background="#2B2B2B" CanUserAddRows="False" SelectionMode="Single" GridLinesVisibility="Horizontal" HeadersVisibility="Column">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Titre" Binding="{Binding Titre}" Width="*" SortMemberPath="Titre"/>
                                     <DataGridTextColumn Header="Catégorie" Binding="{Binding Categorie}" Width="140" SortMemberPath="Categorie"/>
@@ -438,15 +711,16 @@ $xaml = @"
                                 <Button x:Name="BtnTaskRefresh" Content="Rafraîchir" Background="#64748B" Foreground="White" FontWeight="SemiBold" FontSize="13" Padding="12,8" BorderThickness="0" Cursor="Hand"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                <TextBlock Text="●" Foreground="#EF4444" FontSize="13" Margin="0,0,4,0"/><TextBlock Text="en retard" FontSize="11" Foreground="#6B7280" Margin="0,0,16,0"/>
-                                <TextBlock Text="●" Foreground="#F59E0B" FontSize="13" Margin="0,0,4,0"/><TextBlock Text="due aujourd'hui" FontSize="11" Foreground="#6B7280" Margin="0,0,16,0"/>
-                                <TextBlock Text="●" Foreground="#9CA3AF" FontSize="13" Margin="0,0,4,0"/><TextBlock Text="terminé / archivé" FontSize="11" Foreground="#6B7280"/>
+                                <TextBlock Text="●" Foreground="#EF4444" FontSize="13" Margin="0,0,4,0"/><TextBlock Text="en retard" FontSize="11" Foreground="#9A9A9A" Margin="0,0,16,0"/>
+                                <TextBlock Text="●" Foreground="#F59E0B" FontSize="13" Margin="0,0,4,0"/><TextBlock Text="due aujourd'hui" FontSize="11" Foreground="#9A9A9A" Margin="0,0,16,0"/>
+                                <TextBlock Text="●" Foreground="#9CA3AF" FontSize="13" Margin="0,0,4,0"/><TextBlock Text="terminé / archivé" FontSize="11" Foreground="#9A9A9A"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
                 </StackPanel>
             </StackPanel>
-        </ScrollViewer>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </Window>
 "@
@@ -461,6 +735,10 @@ catch {
     if ($_.Exception -and $_.Exception.InnerException) {
         throw "$base $($_.Exception.InnerException.Message)"
     }
+        Show-DashboardError -Message $base -ErrorObject $_.Exception.InnerException
+        throw "$base $($_.Exception.InnerException.Message)"
+    }
+    Show-DashboardError -Message $base -ErrorObject $_.Exception
     throw "$base $($_.Exception.Message)"
 }
 
@@ -487,6 +765,9 @@ $liveProcessText = $window.FindName("LiveProcessText")
 $liveWindowText = $window.FindName("LiveWindowText")
 $liveCategoryText = $window.FindName("LiveCategoryText")
 $liveCurrentTimeText = $window.FindName("LiveCurrentTimeText")
+$liveSampleText = $window.FindName("LiveSampleText")
+$liveLogCountText = $window.FindName("LiveLogCountText")
+$liveLogFileText = $window.FindName("LiveLogFileText")
 $recentActivitiesGrid = $window.FindName("RecentActivitiesGrid")
 
 # Unknown Activities elements
@@ -522,6 +803,9 @@ $btnTaskComplete = $window.FindName("BtnTaskComplete")
 $btnTaskArchive = $window.FindName("BtnTaskArchive")
 $btnTaskReport = $window.FindName("BtnTaskReport")
 $btnTaskRefresh = $window.FindName("BtnTaskRefresh")
+# Top bar global search
+$globalSearchBox = $window.FindName("GlobalSearchBox")
+$searchPlaceholder = $window.FindName("SearchPlaceholder")
 # Dashboard task summary labels
 $taskCountAFaire = $window.FindName("TaskCountAFaire")
 $taskCountEnCours = $window.FindName("TaskCountEnCours")
@@ -542,6 +826,17 @@ $btnSessBreak = $window.FindName("BtnSessBreak")
 $btnSessComplete = $window.FindName("BtnSessComplete")
 $btnSessStop = $window.FindName("BtnSessStop")
 
+# Keep the main window inside the usable desktop area and start at a practical size.
+try {
+    $workArea = [System.Windows.SystemParameters]::WorkArea
+    $window.MaxWidth = [math]::Max(960, $workArea.Width)
+    $window.MaxHeight = [math]::Max(620, $workArea.Height)
+    $window.Width = [math]::Min([double]$window.Width, [double]($workArea.Width * 0.94))
+    $window.Height = [math]::Min([double]$window.Height, [double]($workArea.Height * 0.92))
+    $window.Left = $workArea.Left + [math]::Max(0, ($workArea.Width - $window.Width) / 2)
+    $window.Top = $workArea.Top + [math]::Max(0, ($workArea.Height - $window.Height) / 2)
+} catch { }
+
 # View management
 function Show-View {
     param($viewName)
@@ -558,6 +853,24 @@ function Show-View {
         }
     }
     $global:CurrentView = $viewName
+    Set-NavActive $viewName
+}
+
+function Set-NavActive {
+    param($viewName)
+    $map = @{
+        DashboardView         = $navDashboard
+        LiveTrackingView      = $navLiveTracking
+        UnknownActivitiesView = $navUnknownActivities
+        RulesCategoriesView   = $navRulesCategories
+        TasksView             = $navTasks
+    }
+    foreach ($k in $map.Keys) {
+        $btn = $map[$k]
+        if (-not $btn) { continue }
+        if ($k -eq $viewName) { $btn.Background = "#FFC107"; $btn.Foreground = "#1A1A1A" }
+        else { $btn.Background = "#1A1A1A"; $btn.Foreground = "#CFCFCF" }
+    }
 }
 
 function Invoke-OnUIThread {
@@ -573,11 +886,144 @@ function Invoke-OnUIThread {
     }
 }
 
+function Invoke-OnUIThread {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    if ($window.Dispatcher.CheckAccess()) {
+        & $Action
+    } else {
+        $window.Dispatcher.Invoke($Action)
+    }
+}
+
+function Invoke-OnUIThread {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    if ($window.Dispatcher.CheckAccess()) {
+        & $Action
+    } else {
+        $window.Dispatcher.Invoke($Action)
+    }
+}
+
+function Invoke-OnUIThread {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    if ($window.Dispatcher.CheckAccess()) {
+        & $Action
+    } else {
+        $window.Dispatcher.Invoke($Action)
+    }
+}
+
+function ConvertTo-DisplayText {
+    param(
+        [AllowNull()]
+        [object]$Value,
+        [int]$MaxLength = 0
+    )
+
+    $text = if ($null -eq $Value) { "" } else { [string]$Value }
+    $text = $text -replace "(\r\n|\r|\n)", " "
+
+    if ($MaxLength -gt 3 -and $text.Length -gt $MaxLength) {
+        return $text.Substring(0, $MaxLength - 3) + "..."
+    }
+
+    return $text
+}
+
+function Invoke-OnUIThread {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    if ($window.Dispatcher.CheckAccess()) {
+        & $Action
+    } else {
+        $window.Dispatcher.Invoke($Action)
+    }
+}
+
+function ConvertTo-DisplayText {
+    param(
+        [AllowNull()]
+        [object]$Value,
+        [int]$MaxLength = 0
+    )
+
+    $text = if ($null -eq $Value) { "" } else { [string]$Value }
+    $text = $text -replace "(\r\n|\r|\n)", " "
+
+    if ($MaxLength -gt 3 -and $text.Length -gt $MaxLength) {
+        return $text.Substring(0, $MaxLength - 3) + "..."
+    }
+
+    return $text
+}
+
+function Invoke-OnUIThread {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    if ($window.Dispatcher.CheckAccess()) {
+        & $Action
+    } else {
+        $window.Dispatcher.Invoke($Action)
+    }
+}
+
+function ConvertTo-DisplayText {
+    param(
+        [AllowNull()]
+        [object]$Value,
+        [int]$MaxLength = 0
+    )
+
+    $text = if ($null -eq $Value) { "" } else { [string]$Value }
+    $text = $text -replace "(\r\n|\r|\n)", " "
+
+    if ($MaxLength -gt 3 -and $text.Length -gt $MaxLength) {
+        return $text.Substring(0, $MaxLength - 3) + "..."
+    }
+
+    return $text
+}
+
 $navDashboard.Add_Click({ Show-View "DashboardView" })
 $navLiveTracking.Add_Click({ Show-View "LiveTrackingView" })
 $navUnknownActivities.Add_Click({ Show-View "UnknownActivitiesView" })
 $navRulesCategories.Add_Click({ Show-View "RulesCategoriesView" })
 $navTasks.Add_Click({ Show-View "TasksView" })
+
+# Top-bar global search: routes to the Tâches tab and applies the text filter.
+$globalSearchBox.Add_TextChanged({
+    if ($searchPlaceholder) {
+        $searchPlaceholder.Visibility = if ([string]::IsNullOrEmpty($globalSearchBox.Text)) { "Visible" } else { "Collapsed" }
+    }
+})
+$globalSearchBox.Add_KeyDown({
+    param($s, $e)
+    if ($e.Key -eq "Return") {
+        $q = $globalSearchBox.Text.Trim()
+        $global:TaskSearch = $q
+        if ($taskSearchBox) { $taskSearchBox.Text = $q }
+        Show-View "TasksView"
+        Update-Tasks-UI
+    }
+})
 
 # Initialize UI
 function Initialize-UI {
@@ -588,47 +1034,52 @@ function Initialize-UI {
     Update-Rules-UI
     # Seed starter tasks on first launch (no-op if tasks.json already has data).
     try { Initialize-TaskSeed -Path $global:taskStorePath | Out-Null } catch { if ($Debug) { Write-Warning "Seed failed: $_" } }
+    Restore-InterruptedSession
     Update-Tasks-UI
+    Set-TaskFilterButtons $global:TaskFilter
     Update-SessionUI
     Update-SessionButtons
+    Set-NavActive "DashboardView"
     Update-Dashboard
 }
 
 # Update functions
 function Update-Dashboard {
     Update-TaskSummaryCard   # independent of tracking data
-    $logFile = Get-TodayLogFile -LogFolder $global:logFolder
-    if (!(Test-Path $logFile)) { return }
-    
+
     try {
-        $data = @(Import-Csv -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue)
-        if ($data.Count -eq 0) { return }
-        
-        $sampleSeconds = [int]$data[0].SampleSeconds
-        $totalSeconds = $data.Count * $sampleSeconds
-        $categories = @{}
-        
-        foreach ($row in $data) {
-            if (!$categories[$row.Category]) { $categories[$row.Category] = 0 }
-            $categories[$row.Category] += $sampleSeconds
+        $reportData = Get-DashboardReportData
+        if (-not $reportData) {
+            $totalTimeText.Text = "00:00:00"
+            $focusTimeText.Text = "00:00:00"
+            $distractionTimeText.Text = "00:00:00"
+            $focusScoreText.Text = "0%"
+            $activityChartCanvas.Children.Clear()
+            if ($global:CurrentView -eq "LiveTrackingView") {
+                $recentActivitiesGrid.ItemsSource = @()
+            }
+            return
         }
-        
-        $focusSeconds = if ($categories["travail"]) { $categories["travail"] } else { 0 }
-        $distractionSeconds = if ($categories["distraction"]) { $categories["distraction"] } else { 0 }
-        $focusScore = if ($totalSeconds -gt 0) { [math]::Round(($focusSeconds / $totalSeconds) * 100, 1) } else { 0 }
-        
+
+        $totalSeconds = [int]$reportData.TotalSeconds
+        $focusSeconds = [int]$reportData.FocusSeconds
+        $distractionSeconds = if ($reportData.Categories["distraction"]) { [int]$reportData.Categories["distraction"] } else { 0 }
+        $focusScore = $reportData.FocusScore
+        $global:LoggedRowsToday = @($reportData.DataRows).Count
+
         $totalTimeText.Text = [TimeSpan]::FromSeconds($totalSeconds).ToString('hh\:mm\:ss')
         $focusTimeText.Text = [TimeSpan]::FromSeconds($focusSeconds).ToString('hh\:mm\:ss')
         $distractionTimeText.Text = [TimeSpan]::FromSeconds($distractionSeconds).ToString('hh\:mm\:ss')
         $focusScoreText.Text = "$focusScore%"
+        if ($liveLogCountText) { $liveLogCountText.Text = [string]$global:LoggedRowsToday }
+        if ($liveLogFileText) { $liveLogFileText.Text = "Log: $(Get-TodayLogFile -LogFolder $global:logFolder)" }
+        if ($liveSampleText -and $global:LastSampleAt) { $liveSampleText.Text = $global:LastSampleAt.ToString("HH:mm:ss") }
         
         if ($global:CurrentActivityInfo) {
-            $title = $global:CurrentActivityInfo.WindowTitle
-            if ($title.Length -gt 60) { $title = $title.Substring(0, 57) + "..." }
             $currentProcessText.Text = "Process: $($global:CurrentActivityInfo.ProcessName)"
         }
         
-        Update-ActivityChart -Categories $categories -TotalSeconds $totalSeconds
+        Update-ActivityChart -Categories $reportData.Categories -TotalSeconds $totalSeconds
 
         if ($global:CurrentView -eq "LiveTrackingView") {
             if ($global:CurrentActivityInfo) {
@@ -646,9 +1097,9 @@ function Update-Dashboard {
             } else {
                 $liveCurrentTimeText.Text = "00:00:00"
             }
-            $recentActivities = @($data | Select-Object -Last 10 | ForEach-Object {
+            $recentActivities = @($reportData.DataRows | Select-Object -Last 10 | ForEach-Object {
                 [PSCustomObject]@{
-                    Time = $_.Time; Process = $_.ProcessName; Title = if ($_.WindowTitle.Length -gt 45) { $_.WindowTitle.Substring(0, 42) + "..." } else { $_.WindowTitle }; Category = $_.Category
+                    Time = $_.Time; Process = $_.ProcessName; Title = ConvertTo-DisplayText -Value $_.WindowTitle -MaxLength 45; Category = $_.Category
                 }
             })
             $recentActivitiesGrid.ItemsSource = @($recentActivities | Sort-Object Time -Descending)
@@ -680,12 +1131,12 @@ function Update-ActivityChart {
         $activityChartCanvas.Children.Add($rect) | Out-Null
         
         $textBlock = New-Object Windows.Controls.TextBlock
-        $textBlock.Text = "$([math]::Round($percentage * 100, 1))%"; $textBlock.FontSize = 10; $textBlock.Foreground = "#374151"; $textBlock.TextAlignment = "Center"; $textBlock.Width = $barWidth
+        $textBlock.Text = "$([math]::Round($percentage * 100, 1))%"; $textBlock.FontSize = 10; $textBlock.Foreground = "#CFCFCF"; $textBlock.TextAlignment = "Center"; $textBlock.Width = $barWidth
         [Windows.Controls.Canvas]::SetLeft($textBlock, $x); [Windows.Controls.Canvas]::SetTop($textBlock, 205)
         $activityChartCanvas.Children.Add($textBlock) | Out-Null
         
         $legendText = New-Object Windows.Controls.TextBlock
-        $legendText.Text = "$category"; $legendText.FontSize = 11; $legendText.Foreground = "#374151"; $legendText.FontWeight = "Bold"
+        $legendText.Text = "$category"; $legendText.FontSize = 11; $legendText.Foreground = "#CFCFCF"; $legendText.FontWeight = "Bold"
         [Windows.Controls.Canvas]::SetLeft($legendText, $x - 10); [Windows.Controls.Canvas]::SetTop($legendText, $legendY)
         $activityChartCanvas.Children.Add($legendText) | Out-Null
         
@@ -696,19 +1147,25 @@ function Update-ActivityChart {
 function Update-UnknownActivities {
     $logFile = Get-TodayLogFile -LogFolder $global:logFolder
     if (!(Test-Path $logFile)) { $unknownActivitiesGrid.ItemsSource = @(); return }
-    
+
     try {
         $data = @(Import-Csv -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue)
         if ($data.Count -eq 0) { $unknownActivitiesGrid.ItemsSource = @(); return }
-        
+
         $sampleSeconds = [int]$data[0].SampleSeconds
         $unknownActivities = @()
-        $grouped = $data | Where-Object { $_.Category -eq "inconnu" } | Group-Object { "$($_.ProcessName)|$($_.WindowTitle)" }
-        
+        $groupSeparator = [char]31
+        $grouped = $data | Where-Object { $_.Category -eq "inconnu" } | Group-Object { "$($_.ProcessName)$groupSeparator$($_.WindowTitle)" }
+
         foreach ($group in $grouped) {
-            $parts = $group.Name -split '\|'
+            $parts = $group.Name -split [regex]::Escape([string]$groupSeparator), 2
+            $processName = if ($parts.Count -gt 0) { $parts[0] } else { "" }
+            $windowTitle = if ($parts.Count -gt 1) { $parts[1] } else { "" }
             $unknownActivities += [PSCustomObject]@{
-                ProcessName = $parts[0]; WindowTitle = $parts[1]; Count = $group.Count; TotalTime = [TimeSpan]::FromSeconds($group.Count * $sampleSeconds).ToString('hh\:mm\:ss')
+                ProcessName = $processName
+                WindowTitle = $windowTitle
+                Count       = $group.Count
+                TotalTime   = [TimeSpan]::FromSeconds($group.Count * $sampleSeconds).ToString('hh\:mm\:ss')
             }
         }
         $unknownActivitiesGrid.ItemsSource = @($unknownActivities)
@@ -737,7 +1194,12 @@ function Update-Rules-UI {
 function Stop-TrackingTimer {
     if ($global:TrackerTimer) {
         $global:TrackerTimer.Stop()
+        try { $global:TrackerTimer.Dispose() } catch { }
         $global:TrackerTimer = $null
+    }
+    if ($global:TrackerTimerEventSub) {
+        Unregister-Event -SubscriptionId $global:TrackerTimerEventSub.Id -ErrorAction SilentlyContinue
+        $global:TrackerTimerEventSub = $null
     }
 }
 
@@ -748,49 +1210,268 @@ function Stop-DashboardTimer {
     }
 }
 
+function Write-DashboardRuntimeError {
+    param([string]$Message)
+    try {
+        $log = Join-Path $global:logFolder "dashboard-runtime.log"
+        Add-Content -Path $log -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" -Encoding UTF8
+    } catch { }
+        $global:DashboardUpdateTimer.Dispose()
+        $global:DashboardUpdateTimer = $null
+    }
+    if ($global:DashboardTimerEventSub) {
+        Unregister-Event -SubscriptionId $global:DashboardTimerEventSub.Id -ErrorAction SilentlyContinue
+        $global:DashboardTimerEventSub = $null
+    }
+}
+
+Write-DashboardRuntimeError "Dashboard script initialized. pid=$PID"
+
+function Save-SessionCheckpoint {
+    param($Readout = $null, [datetime]$Now = (Get-Date))
+    if (-not $global:SessionState) { return }
+    try {
+        if (-not $Readout) { $Readout = Step-Session -State $global:SessionState -Now $Now }
+        $data = [ordered]@{
+            SavedAt         = $Now.ToString('s')
+            TaskId          = [string]$global:SessionState.TaskId
+            TaskTitle       = [string]$global:SessionState.TaskTitle
+            EstimateSec     = [int]$global:SessionState.EstimateSec
+            Debut           = ([datetime]$global:SessionState.StartWall).ToString('s')
+            TravailSecondes = [int]$Readout.WorkSec
+            GlobalSecondes  = [int]$Readout.GlobalSec
+            PauseSecondes   = [int]$Readout.PauseSec
+            PomodorosFait   = [int]$Readout.PomCompleted
+            Mode            = [string]$global:SessionState.Mode
+        }
+        $json = $data | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($global:SessionCheckpointFile, $json, [System.Text.UTF8Encoding]::new($true))
+    } catch {
+        Write-DashboardRuntimeError "Save-SessionCheckpoint failed: $_"
+    }
+}
+
+function Clear-SessionCheckpoint {
+    try {
+        if (Test-Path $global:SessionCheckpointFile) {
+            Remove-Item $global:SessionCheckpointFile -Force
+        }
+    } catch {
+        Write-DashboardRuntimeError "Clear-SessionCheckpoint failed: $_"
+    }
+}
+
+function Restore-InterruptedSession {
+    try {
+        if (-not (Test-Path $global:SessionCheckpointFile)) { return }
+        $cp = Get-Content $global:SessionCheckpointFile -Raw | ConvertFrom-Json
+        if (-not $cp.TaskId -or [int]$cp.TravailSecondes -lt 30) {
+            Clear-SessionCheckpoint
+            return
+        }
+
+        $res = [PSCustomObject]@{
+            TaskId          = [string]$cp.TaskId
+            Debut           = [string]$cp.Debut
+            Fin             = [string]$cp.SavedAt
+            TravailSecondes = [int]$cp.TravailSecondes
+            GlobalSecondes  = [int]$cp.GlobalSecondes
+            PauseSecondes   = [int]$cp.PauseSecondes
+            PomodorosFait   = [int]$cp.PomodorosFait
+        }
+        Add-TaskSession -Id ([string]$cp.TaskId) -Result $res -Path $global:taskStorePath | Out-Null
+        Write-DashboardRuntimeError "Recovered interrupted session. task=$($cp.TaskId) workSec=$($cp.TravailSecondes)"
+        Clear-SessionCheckpoint
+    } catch {
+        Write-DashboardRuntimeError "Restore-InterruptedSession failed: $_"
+    }
+}
+
+function Get-RealTaskSessions {
+    param([object]$Task)
+    if (-not $Task -or -not $Task.Sessions) { return @() }
+    return @($Task.Sessions | Where-Object {
+        $_ -and (
+            $_.Debut -or
+            $_.Fin -or
+            ([int]$_.TravailSecondes -gt 0) -or
+            ([int]$_.GlobalSecondes -gt 0)
+        )
+    })
+}
+
+function Get-LiveSessionResult {
+    param([datetime]$Now = (Get-Date))
+    if (-not $global:SessionState) { return $null }
+    try {
+        $r = if ($global:SessionReadout) { $global:SessionReadout } else { Step-Session -State $global:SessionState -Now $Now }
+        return [PSCustomObject]@{
+            TaskId          = [string]$global:SessionState.TaskId
+            Debut           = ([datetime]$global:SessionState.StartWall).ToString('s')
+            Fin             = $Now.ToString('s')
+            TravailSecondes = [int]$r.WorkSec
+            GlobalSecondes  = [int]$r.GlobalSec
+            PauseSecondes   = [int]$r.PauseSec
+            PomodorosFait   = [int]$r.PomCompleted
+        }
+    } catch {
+        Write-DashboardRuntimeError "Get-LiveSessionResult failed: $_"
+        return $null
+    }
+}
+
+function Get-TasksForReporting {
+    param([switch]$IncludeLiveSession)
+    $tasks = @(Get-Tasks -Path $global:taskStorePath)
+    if (-not $IncludeLiveSession -or -not $global:SessionState) { return $tasks }
+
+    $live = Get-LiveSessionResult
+    if (-not $live -or [int]$live.TravailSecondes -le 0) { return $tasks }
+
+    foreach ($t in $tasks) {
+        if ($t.Id -eq $live.TaskId) {
+            $sessions = @(Get-RealTaskSessions -Task $t)
+            $sessions += [PSCustomObject]@{
+                Debut           = $live.Debut
+                Fin             = $live.Fin
+                TravailSecondes = [int]$live.TravailSecondes
+                GlobalSecondes  = [int]$live.GlobalSecondes
+                PauseSecondes   = [int]$live.PauseSecondes
+                PomodorosFait   = [int]$live.PomodorosFait
+            }
+            $t | Add-Member -NotePropertyName Sessions -NotePropertyValue $sessions -Force
+            $t | Add-Member -NotePropertyName TempsTravailSecondes -NotePropertyValue ([int]$t.TempsTravailSecondes + [int]$live.TravailSecondes) -Force
+            $t | Add-Member -NotePropertyName TempsGlobalSecondes -NotePropertyValue ([int]$t.TempsGlobalSecondes + [int]$live.GlobalSecondes) -Force
+            $t | Add-Member -NotePropertyName Statut -NotePropertyValue "En_cours" -Force
+            break
+        }
+    }
+    return $tasks
+}
+
+function Invoke-TrackingSample {
+    try {
+        if (-not $global:CurrentLogFile) {
+            $global:CurrentLogFile = Get-TodayLogFile -LogFolder $global:logFolder
+            Initialize-LogFile -LogFile $global:CurrentLogFile
+        }
+
+        $info = Get-ActiveWindowInfo
+        if (-not $info) {
+            Write-DashboardRuntimeError "Get-ActiveWindowInfo returned null"
+            return
+        }
+
+        $isAfotraWindow = ($info.ProcessName -in @("powershell", "pwsh") -and $info.WindowTitle -like "*AFOTRA*")
+        if ($isAfotraWindow) {
+            $display = $global:CurrentActivityInfo
+            if ($display) {
+                $liveProcessText.Text = $display.ProcessName
+                $liveWindowText.Text = $display.WindowTitle
+                $liveCategoryText.Text = $display.Category
+                $statusText.Text = "Status: Running - AFOTRA ignoré"
+            } else {
+                $liveProcessText.Text = "AFOTRA"
+                $liveWindowText.Text = "Fenêtre AFOTRA ignorée : passe sur une autre application pour enregistrer l'activité."
+                $liveCategoryText.Text = "--"
+                $statusText.Text = "Status: Running - en attente d'une autre appli"
+            }
+            return
+        }
+
+        $idleThreshold = if ($global:config.idleThresholdSeconds) { [int]$global:config.idleThresholdSeconds } else { 180 }
+        $category = if ((Get-IsSessionLocked -ActivityInfo $info) -or (Get-IdleSeconds -ge $idleThreshold)) {
+            "inactif"
+        } else {
+            Classify-Activity -ProcessName $info.ProcessName -WindowTitle $info.WindowTitle -Rules $global:rules
+        }
+        $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
+        Write-ActivityLog -LogFile $global:CurrentLogFile -ActivityInfo $info -SampleSeconds $global:config.sampleIntervalSeconds
+        $global:LastSampleAt = Get-Date
+        $global:LoggedRowsToday = [int]$global:LoggedRowsToday + 1
+
+        if (-not ($global:CurrentActivityInfo -and
+                  $global:CurrentActivityInfo.ProcessName -eq $info.ProcessName -and
+                  $global:CurrentActivityInfo.WindowTitle  -eq $info.WindowTitle)) {
+            $global:CurrentActivityStart = Get-Date
+        }
+        $global:CurrentActivityInfo = $info
+        $currentProcessText.Text = "Process: $($info.ProcessName)"
+        $liveProcessText.Text = $info.ProcessName
+        $liveWindowText.Text = $info.WindowTitle
+        $liveCategoryText.Text = $info.Category
+        if ($liveSampleText) { $liveSampleText.Text = $global:LastSampleAt.ToString("HH:mm:ss") }
+        if ($liveLogCountText) { $liveLogCountText.Text = [string]$global:LoggedRowsToday }
+        if ($liveLogFileText) { $liveLogFileText.Text = "Log: $($global:CurrentLogFile)" }
+        $statusText.Text = "Status: Running - $($info.ProcessName) > $category"
+        Update-Dashboard
+    } catch {
+        Write-DashboardRuntimeError "Tracking sample failed: $_"
+        if ($Debug) { Write-Warning "Tracking sample failed: $_" }
+    }
+}
+
+function Update-TrackingButtons {
+    try {
+        $isRunning = [bool]$global:TrackerRunning
+        if ($btnStartStop) {
+            $btnStartStop.Content = if ($isRunning) { "Stop Tracking" } else { "Start Tracking" }
+            $btnStartStop.Background = if ($isRunning) { "#EF4444" } else { "#FFC107" }
+            $btnStartStop.Foreground = if ($isRunning) { "White" } else { "#1A1A1A" }
+        }
+        if ($btnOverlayStartStop) {
+            $btnOverlayStartStop.Content = if ($isRunning) { "Live ON" } else { "Live OFF" }
+            $btnOverlayStartStop.Background = if ($isRunning) { "#EF4444" } else { "#10B981" }
+            $btnOverlayStartStop.Foreground = "White"
+        }
+        if ($ovStatusDot) {
+            $ovStatusDot.Fill = if ($isRunning) { "#10B981" } else { "#6B7280" }
+        }
+    } catch {
+        Write-DashboardRuntimeError "Update-TrackingButtons failed: $_"
+    }
+}
+
+function Start-AfotraTracking {
+    if ($global:TrackerRunning) {
+        Update-TrackingButtons
+        return
+    }
+    Write-DashboardRuntimeError "Live tracking start requested."
+    $global:TrackerRunning = $true
+    $global:CurrentLogFile = Get-TodayLogFile -LogFolder $global:logFolder
+    Initialize-LogFile -LogFile $global:CurrentLogFile
+
+    $global:TrackerTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $global:TrackerTimer.Interval = [TimeSpan]::FromSeconds($global:config.sampleIntervalSeconds)
+    $global:TrackerTimer.Add_Tick({ Invoke-TrackingSample })
+    $global:TrackerTimer.Start()
+
+    $btnStartStop.Content = "Stop Tracking"
+    $btnStartStop.Background = "#EF4444"
+    $btnStartStop.Foreground = "White"
+    Update-TrackingButtons
+    $statusText.Text = "Status: Running..."
+    Invoke-TrackingSample
+}
+
+function Stop-AfotraTracking {
+    if (-not $global:TrackerRunning) { return }
+    Write-DashboardRuntimeError "Live tracking stop requested."
+    $global:TrackerRunning = $false
+    Stop-TrackingTimer
+    $statusText.Text = "Status: Stopped"
+    $btnStartStop.Content = "Start Tracking"
+    $btnStartStop.Background = "#FFC107"
+    $btnStartStop.Foreground = "#1A1A1A"
+    Update-TrackingButtons
+    Update-Dashboard
+}
+
 # Tracking button
 $btnStartStop.Add_Click({
-    if (!$global:TrackerRunning) {
-        $global:TrackerRunning = $true
-        $global:CurrentLogFile = Get-TodayLogFile -LogFolder $global:logFolder
-        Initialize-LogFile -LogFile $global:CurrentLogFile
-        
-        # DispatcherTimer runs on the WPF UI thread — same runspace as imported modules
-        $global:TrackerTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $global:TrackerTimer.Interval = [TimeSpan]::FromSeconds($global:config.sampleIntervalSeconds)
-
-        $global:TrackerTimer.Add_Tick({
-            $info = Get-ActiveWindowInfo
-            if ($info) {
-                $isAfotraWindow = ($info.ProcessName -eq "powershell" -and $info.WindowTitle -like "*AFOTRA*")
-                if (-not $isAfotraWindow) {
-                    $category = Classify-Activity -ProcessName $info.ProcessName -WindowTitle $info.WindowTitle -Rules $global:rules
-                    $info | Add-Member -NotePropertyName "Category" -NotePropertyValue $category -Force
-                    Write-ActivityLog -LogFile $global:CurrentLogFile -ActivityInfo $info -SampleSeconds $global:config.sampleIntervalSeconds
-
-                    if (-not ($global:CurrentActivityInfo -and
-                              $global:CurrentActivityInfo.ProcessName -eq $info.ProcessName -and
-                              $global:CurrentActivityInfo.WindowTitle  -eq $info.WindowTitle)) {
-                        $global:CurrentActivityStart = Get-Date
-                        $global:CurrentActivityInfo  = $info
-                    }
-                }
-            }
-        })
-        $global:TrackerTimer.Start()
-        
-        $btnStartStop.Content = "Stop Tracking"
-        $btnStartStop.Background = "#EF4444"
-        $statusText.Text = "Status: Running..."
-        
-    } else {
-        $global:TrackerRunning = $false
-        Stop-TrackingTimer
-        $statusText.Text = "Status: Stopped"
-        $btnStartStop.Content = "Start Tracking"
-        $btnStartStop.Background = "#10B981"
-        Update-Dashboard
-    }
+    if (!$global:TrackerRunning) { Start-AfotraTracking }
+    else { Stop-AfotraTracking }
 })
 
 # Actions
@@ -813,7 +1494,7 @@ $btnCategorizeUnknown.Add_Click({
     $btnOk = New-Object System.Windows.Forms.Button; $btnOk.Text = "OK"; $btnOk.Location = New-Object System.Drawing.Point(280, 210); $btnOk.DialogResult = "OK"; $form.Controls.Add($btnOk)
     $btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.Location = New-Object System.Drawing.Point(360, 210); $btnCancel.DialogResult = "Cancel"; $form.Controls.Add($btnCancel)
     
-    if ($form.ShowDialog() -eq "OK") {
+    Set-DarkTheme -Control $form; if ($form.ShowDialog() -eq "OK") {
         if ($radio1.Checked) { Add-ProcessRule -Rules $global:rules -Process $selectedItem.ProcessName -Category $combo.SelectedItem }
         else { Add-TitleRule -Rules $global:rules -Contains $selectedItem.WindowTitle -Category $combo.SelectedItem }
         Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
@@ -847,7 +1528,7 @@ $btnAddProcessRule.Add_Click({
     $btnOk = New-Object System.Windows.Forms.Button; $btnOk.Text = "OK"; $btnOk.Location = New-Object System.Drawing.Point(240, 170); $btnOk.DialogResult = "OK"; $form.Controls.Add($btnOk)
     $btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.Location = New-Object System.Drawing.Point(320, 170); $btnCancel.DialogResult = "Cancel"; $form.Controls.Add($btnCancel)
     
-    if ($form.ShowDialog() -eq "OK" -and $text.Text.Trim()) {
+    Set-DarkTheme -Control $form; if ($form.ShowDialog() -eq "OK" -and $text.Text.Trim()) {
         Add-ProcessRule -Rules $global:rules -Process $text.Text.Trim() -Category $combo.SelectedItem
         Save-Rules -Rules $global:rules -RulesPath $global:rulesPath
         Update-Rules-UI
@@ -947,7 +1628,7 @@ $btnAnalyzeChrome.Add_Click({
     $btnCancel.Text = "Annuler"; $btnCancel.Location = New-Object System.Drawing.Point(598, 12); $btnCancel.Width = 70; $btnCancel.DialogResult = "Cancel"
     $btnPanel.Controls.Add($btnCancel)
 
-    if ($form.ShowDialog() -eq "OK") {
+    Set-DarkTheme -Control $form; if ($form.ShowDialog() -eq "OK") {
         $added = 0
         foreach ($row in $controls) {
             if ($row.Combo.SelectedIndex -gt 0) {
@@ -971,26 +1652,34 @@ $btnAnalyzeChrome.Add_Click({
 
 $btnGenerateReport.Add_Click({
     $logFile = Get-TodayLogFile -LogFolder $global:logFolder
-    if (Test-Path $logFile) {
-        try {
-            $reportData = Get-ReportData -LogFile $logFile
-            if ($reportData) {
-                $date = Get-Date -Format "yyyy-MM-dd"
-                $jsonFile = Join-Path (Join-Path $global:logFolder "reports") "summary-$date.json"
-                $taskSummary = $null
-                $taskDetail = $null
-                try {
-                    $allTasks = @(Get-Tasks -Path $global:taskStorePath)
-                    $taskSummary = Get-TaskSummary -Tasks $allTasks
-                    $taskDetail = @($allTasks | Where-Object { @($_.Sessions).Count -gt 0 } | ForEach-Object { Get-TaskReport -Task $_ })
-                } catch { }
-                Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary -TaskDetail $taskDetail
-                [Windows.MessageBox]::Show("Report generated!`n`n$jsonFile", "AFOTRA") | Out-Null
-                Explorer.exe $jsonFile
-            }
-        } catch {
-            [Windows.MessageBox]::Show("Error: $_", "AFOTRA") | Out-Null
+    if (!(Test-Path $logFile)) {
+        [Windows.MessageBox]::Show("Aucune donnée de suivi pour aujourd'hui.`n`nClique d'abord sur Start Tracking, travaille quelques minutes, puis regénère le rapport.", "AFOTRA") | Out-Null
+        return
+    }
+
+    try {
+        $reportData = Get-DashboardReportData
+        if (-not $reportData) {
+            [Windows.MessageBox]::Show("Impossible de traiter le journal du jour.`n`nFichier : $logFile", "AFOTRA") | Out-Null
+            return
         }
+        $date = Get-Date -Format "yyyy-MM-dd"
+        $reportFolder = Join-Path $global:logFolder "reports"
+        if (!(Test-Path $reportFolder)) { New-Item -ItemType Directory -Path $reportFolder -Force | Out-Null }
+        $jsonFile = Join-Path $reportFolder "summary-$date.json"
+        $taskSummary = $null
+        $taskDetail = $null
+        try {
+            $allTasks = @(Get-TasksForReporting -IncludeLiveSession)
+            $taskSummary = Get-TaskSummary -Tasks $allTasks
+            $taskDetail = @($allTasks | Where-Object { @(Get-RealTaskSessions -Task $_).Count -gt 0 } | ForEach-Object { Get-TaskReport -Task $_ })
+        } catch { if ($Debug) { Write-Warning "Task report section failed: $_" } }
+        Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary -TaskDetail $taskDetail
+        Update-Dashboard
+        [Windows.MessageBox]::Show("Rapport généré !`n`n$jsonFile", "AFOTRA") | Out-Null
+        Start-Process explorer.exe -ArgumentList "/select,`"$jsonFile`""
+    } catch {
+        [Windows.MessageBox]::Show("Erreur génération rapport : $_", "AFOTRA") | Out-Null
     }
 })
 
@@ -1002,649 +1691,6 @@ $btnOpenLogs.Add_Click({
 # TASKS — helpers, list rendering, dialog, handlers, reminder timer
 # ===================================================================
 $global:TasksCache = @()
-
-function Get-TaskPriorityRank {
-    param([string]$Priorite)
-    switch ($Priorite) {
-        "Urgente" { 0 } "Haute" { 1 } "Normale" { 2 } "Basse" { 3 } default { 4 }
-    }
-}
-
-function Update-TaskSummaryCard {
-    try {
-        $tasks = @(Get-Tasks -Path $global:taskStorePath)
-        $sum = Get-TaskSummary -Tasks $tasks
-        $taskCountAFaire.Text  = [string]$sum.AFaire
-        $taskCountEnCours.Text = [string]$sum.EnCours
-        $taskCountTermine.Text = [string]$sum.TermineesAujourdhui
-        $taskCountRetard.Text  = [string]$sum.EnRetard
-    } catch { if ($Debug) { Write-Warning "Update-TaskSummaryCard failed: $_" } }
-}
-
-function Update-Tasks-UI {
-    try {
-        $global:TasksCache = @(Get-Tasks -Path $global:taskStorePath)
-        $now = Get-Date
-        $todayStart = $now.Date
-        $tomorrowStart = $todayStart.AddDays(1)
-
-        $rows = @()
-        foreach ($t in $global:TasksCache) {
-            $closed = $t.Statut -in @("Termine", "Archive")
-            $ech = ConvertFrom-IsoDate $t.DateEcheance
-
-            # Row state for colour coding (échéance-based).
-            $state = "Normal"
-            if ($closed) { $state = "Termine" }
-            elseif ($ech -and $ech -lt $todayStart) { $state = "Retard" }
-            elseif ($ech -and $ech -ge $todayStart -and $ech -lt $tomorrowStart) { $state = "Aujourdhui" }
-
-            # Quick filter
-            $keep = switch ($global:TaskFilter) {
-                "AFaire"     { $t.Statut -eq "A_faire" }
-                "EnCours"    { $t.Statut -eq "En_cours" }
-                "Aujourdhui" { (-not $closed) -and $state -eq "Aujourdhui" }
-                "Retard"     { (-not $closed) -and $state -eq "Retard" }
-                default      { $true }
-            }
-            if (-not $keep) { continue }
-
-            # Text search across the meaningful fields
-            if ($global:TaskSearch) {
-                $hay = @($t.Titre, $t.Description, $t.Categorie, $t.Projet, $t.Contact, $t.Notes) -join " "
-                if ($hay -notlike "*$($global:TaskSearch)*") { continue }
-            }
-
-            $estMin  = [int]$t.EstimeMinutes
-            $passeSec = [int]$t.TempsTravailSecondes
-            $rows += [PSCustomObject]@{
-                Titre        = $t.Titre
-                Categorie    = $t.Categorie
-                Priorite     = $t.Priorite
-                Echeance     = if ($ech) { $ech.ToString("yyyy-MM-dd") } else { "" }
-                EcheanceSort = if ($ech) { $ech.ToString("yyyy-MM-ddTHH:mm:ss") } else { "9999-12-31" }
-                PrioriteRank = Get-TaskPriorityRank $t.Priorite
-                Statut       = $t.Statut
-                Estime       = if ($estMin -gt 0) { "${estMin}m" } else { "" }
-                EstimeSort   = $estMin
-                Passe        = if ($passeSec -gt 0) { [TimeSpan]::FromSeconds($passeSec).ToString('hh\:mm') } else { "" }
-                PasseSort    = $passeSec
-                Contact      = $t.Contact
-                Id           = $t.Id
-                _State       = $state
-            }
-        }
-        $tasksGrid.ItemsSource = @($rows)
-    } catch { if ($Debug) { Write-Warning "Update-Tasks-UI failed: $_" } }
-}
-
-# Row colour coding (recycled rows: always set a background so stale colours clear).
-$tasksGrid.Add_LoadingRow({
-    param($sender, $e)
-    $item = $e.Row.Item
-    $white  = [System.Windows.Media.Brushes]::White
-    $gray   = [System.Windows.Media.Brushes]::Gray
-    $black  = [System.Windows.Media.Brushes]::Black
-    $red    = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(254, 226, 226)) # rose
-    $orange = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(254, 243, 199)) # amber
-    $lgray  = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(243, 244, 246)) # gray-100
-    $state = $null
-    if ($item -and ($item.PSObject.Properties.Name -contains "_State")) { $state = $item._State }
-    switch ($state) {
-        "Retard"     { $e.Row.Background = $red;    $e.Row.Foreground = $black }
-        "Aujourdhui" { $e.Row.Background = $orange; $e.Row.Foreground = $black }
-        "Termine"    { $e.Row.Background = $lgray;  $e.Row.Foreground = $gray }
-        default      { $e.Row.Background = $white;  $e.Row.Foreground = $black }
-    }
-})
-
-function Get-SelectedTask {
-    $sel = $tasksGrid.SelectedItem
-    if (-not $sel) { return $null }
-    return @($global:TasksCache | Where-Object { $_.Id -eq $sel.Id })[0]
-}
-
-# WinForms add/edit modal (consistent with the app's other dialogs). Returns a
-# field-values object, or $null if cancelled.
-function Show-TaskDialog {
-    param([object]$Existing)
-
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = if ($Existing) { "Éditer la tâche" } else { "Nouvelle tâche" }
-    $form.Width = 560; $form.Height = 680; $form.StartPosition = "CenterScreen"
-    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-    $form.AutoScroll = $true
-
-    # Single script-scoped layout cursor so the nested Add-Label and the inline
-    # control placement share the SAME counter (a plain local would not be visible
-    # inside the nested function).
-    $script:dlgY = 12
-    function Add-Label($text) {
-        $l = New-Object System.Windows.Forms.Label
-        $l.Text = $text; $l.Location = New-Object System.Drawing.Point(15, $script:dlgY); $l.AutoSize = $true
-        $form.Controls.Add($l); $script:dlgY += 20
-    }
-
-    Add-Label "Titre *"
-    $txtTitre = New-Object System.Windows.Forms.TextBox
-    $txtTitre.Location = New-Object System.Drawing.Point(15, $script:dlgY); $txtTitre.Width = 505
-    $form.Controls.Add($txtTitre); $script:dlgY += 30
-
-    Add-Label "Description"
-    $txtDesc = New-Object System.Windows.Forms.TextBox
-    $txtDesc.Location = New-Object System.Drawing.Point(15, $script:dlgY); $txtDesc.Width = 505; $txtDesc.Height = 50
-    $txtDesc.Multiline = $true; $txtDesc.ScrollBars = "Vertical"
-    $form.Controls.Add($txtDesc); $script:dlgY += 60
-
-    Add-Label "Catégorie"
-    $cbCat = New-Object System.Windows.Forms.ComboBox
-    $cbCat.Location = New-Object System.Drawing.Point(15, $script:dlgY); $cbCat.Width = 240; $cbCat.DropDownStyle = "DropDown"
-    $catItems = @("Appels", "AWEMA/Clients", "Ciné Light Studio", "HOLYGOD TV")
-    $catItems += @($global:rules.categories)
-    $catItems += @($global:TasksCache | ForEach-Object { $_.Categorie })
-    foreach ($c in ($catItems | Where-Object { $_ } | Select-Object -Unique)) { $cbCat.Items.Add($c) | Out-Null }
-    $form.Controls.Add($cbCat)
-
-    $lblProj = New-Object System.Windows.Forms.Label
-    $lblProj.Text = "Projet"; $lblProj.Location = New-Object System.Drawing.Point(275, ($script:dlgY - 20)); $lblProj.AutoSize = $true
-    $form.Controls.Add($lblProj)
-    $txtProj = New-Object System.Windows.Forms.TextBox
-    $txtProj.Location = New-Object System.Drawing.Point(280, $script:dlgY); $txtProj.Width = 240
-    $form.Controls.Add($txtProj); $script:dlgY += 32
-
-    Add-Label "Contact"
-    $txtContact = New-Object System.Windows.Forms.TextBox
-    $txtContact.Location = New-Object System.Drawing.Point(15, $script:dlgY); $txtContact.Width = 505
-    $form.Controls.Add($txtContact); $script:dlgY += 32
-
-    Add-Label "Priorité"
-    $cbPrio = New-Object System.Windows.Forms.ComboBox
-    $cbPrio.Location = New-Object System.Drawing.Point(15, $script:dlgY); $cbPrio.Width = 240; $cbPrio.DropDownStyle = "DropDownList"
-    foreach ($p in @("Basse", "Normale", "Haute", "Urgente")) { $cbPrio.Items.Add($p) | Out-Null }
-
-    $lblStat = New-Object System.Windows.Forms.Label
-    $lblStat.Text = "Statut"; $lblStat.Location = New-Object System.Drawing.Point(275, ($script:dlgY - 20)); $lblStat.AutoSize = $true
-    $form.Controls.Add($lblStat)
-    $cbStat = New-Object System.Windows.Forms.ComboBox
-    $cbStat.Location = New-Object System.Drawing.Point(280, $script:dlgY); $cbStat.Width = 240; $cbStat.DropDownStyle = "DropDownList"
-    foreach ($s in @("A_faire", "En_cours", "En_attente", "Termine", "Archive")) { $cbStat.Items.Add($s) | Out-Null }
-    $form.Controls.Add($cbPrio); $form.Controls.Add($cbStat); $script:dlgY += 34
-
-    Add-Label "Estimé (minutes, 0 = aucun)"
-    $numEst = New-Object System.Windows.Forms.NumericUpDown
-    $numEst.Location = New-Object System.Drawing.Point(15, $script:dlgY); $numEst.Width = 120
-    $numEst.Minimum = 0; $numEst.Maximum = 100000; $numEst.Increment = 5
-    $form.Controls.Add($numEst); $script:dlgY += 34
-
-    # Échéance (optional)
-    $chkEch = New-Object System.Windows.Forms.CheckBox
-    $chkEch.Text = "Échéance"; $chkEch.Location = New-Object System.Drawing.Point(15, $script:dlgY); $chkEch.AutoSize = $true
-    $form.Controls.Add($chkEch)
-    $dtEch = New-Object System.Windows.Forms.DateTimePicker
-    $dtEch.Location = New-Object System.Drawing.Point(160, ($script:dlgY - 3)); $dtEch.Width = 200
-    $dtEch.Format = "Custom"; $dtEch.CustomFormat = "yyyy-MM-dd HH:mm"; $dtEch.Enabled = $false
-    $form.Controls.Add($dtEch)
-    $chkEch.Add_CheckedChanged({ $dtEch.Enabled = $chkEch.Checked }.GetNewClosure())
-    $script:dlgY += 32
-
-    # Rappel du soir (optional)
-    $chkRap = New-Object System.Windows.Forms.CheckBox
-    $chkRap.Text = "Rappel du soir"; $chkRap.Location = New-Object System.Drawing.Point(15, $script:dlgY); $chkRap.AutoSize = $true
-    $form.Controls.Add($chkRap)
-    $dtRap = New-Object System.Windows.Forms.DateTimePicker
-    $dtRap.Location = New-Object System.Drawing.Point(160, ($script:dlgY - 3)); $dtRap.Width = 200
-    $dtRap.Format = "Custom"; $dtRap.CustomFormat = "yyyy-MM-dd HH:mm"; $dtRap.Enabled = $false
-    $form.Controls.Add($dtRap)
-    $chkRap.Add_CheckedChanged({ $dtRap.Enabled = $chkRap.Checked }.GetNewClosure())
-    $script:dlgY += 32
-
-    Add-Label "Bloquée par"
-    $txtBloc = New-Object System.Windows.Forms.TextBox
-    $txtBloc.Location = New-Object System.Drawing.Point(15, $script:dlgY); $txtBloc.Width = 505
-    $form.Controls.Add($txtBloc); $script:dlgY += 32
-
-    Add-Label "Notes"
-    $txtNotes = New-Object System.Windows.Forms.TextBox
-    $txtNotes.Location = New-Object System.Drawing.Point(15, $script:dlgY); $txtNotes.Width = 505; $txtNotes.Height = 70
-    $txtNotes.Multiline = $true; $txtNotes.ScrollBars = "Vertical"
-    $form.Controls.Add($txtNotes); $script:dlgY += 82
-
-    $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = "Enregistrer"; $btnOk.Location = New-Object System.Drawing.Point(330, $script:dlgY); $btnOk.Width = 90; $btnOk.DialogResult = "OK"
-    $form.Controls.Add($btnOk)
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Annuler"; $btnCancel.Location = New-Object System.Drawing.Point(430, $script:dlgY); $btnCancel.Width = 90; $btnCancel.DialogResult = "Cancel"
-    $form.Controls.Add($btnCancel)
-    $form.AcceptButton = $btnOk; $form.CancelButton = $btnCancel
-
-    # Defaults / populate for edit
-    $cbPrio.SelectedItem = "Normale"; $cbStat.SelectedItem = "A_faire"
-    if ($Existing) {
-        $txtTitre.Text = [string]$Existing.Titre
-        $txtDesc.Text = [string]$Existing.Description
-        $cbCat.Text = [string]$Existing.Categorie
-        $txtProj.Text = [string]$Existing.Projet
-        $txtContact.Text = [string]$Existing.Contact
-        if ($Existing.Priorite) { $cbPrio.SelectedItem = [string]$Existing.Priorite }
-        if ($Existing.Statut)   { $cbStat.SelectedItem = [string]$Existing.Statut }
-        $txtBloc.Text = [string]$Existing.Bloquee_par
-        $txtNotes.Text = [string]$Existing.Notes
-        $eEch = ConvertFrom-IsoDate $Existing.DateEcheance
-        if ($eEch) { $chkEch.Checked = $true; $dtEch.Enabled = $true; $dtEch.Value = $eEch }
-        $eRap = ConvertFrom-IsoDate $Existing.RappelSoir
-        if ($eRap) { $chkRap.Checked = $true; $dtRap.Enabled = $true; $dtRap.Value = $eRap }
-        if ([int]$Existing.EstimeMinutes -gt 0) { $numEst.Value = [int]$Existing.EstimeMinutes }
-    } else {
-        $dtRap.Value = [datetime]::new((Get-Date).Year, (Get-Date).Month, (Get-Date).Day, 20, 0, 0)
-    }
-
-    $result = $form.ShowDialog()
-    if ($result -ne "OK") { $form.Dispose(); return $null }
-    if ([string]::IsNullOrWhiteSpace($txtTitre.Text)) {
-        [System.Windows.Forms.MessageBox]::Show("Le titre est obligatoire.", "AFOTRA") | Out-Null
-        $form.Dispose(); return $null
-    }
-
-    $vals = [PSCustomObject]@{
-        Titre        = $txtTitre.Text.Trim()
-        Description  = $txtDesc.Text
-        Categorie    = $cbCat.Text.Trim()
-        Projet       = $txtProj.Text.Trim()
-        Contact      = $txtContact.Text.Trim()
-        Priorite     = [string]$cbPrio.SelectedItem
-        Statut       = [string]$cbStat.SelectedItem
-        DateEcheance = if ($chkEch.Checked) { $dtEch.Value } else { $null }
-        RappelSoir   = if ($chkRap.Checked) { $dtRap.Value } else { $null }
-        Bloquee_par  = $txtBloc.Text.Trim()
-        Notes        = $txtNotes.Text
-        EstimeMinutes = [int]$numEst.Value
-    }
-    $form.Dispose()
-    return $vals
-}
-
-function Show-TaskReportDialog {
-    param([object]$Task)
-    Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
-    $report = Get-TaskReport -Task $Task
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Rapport de tâche"; $form.Width = 620; $form.Height = 580; $form.StartPosition = "CenterScreen"
-    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
-    $panel = New-Object System.Windows.Forms.Panel; $panel.Dock = "Bottom"; $panel.Height = 46; $form.Controls.Add($panel)
-    $box = New-Object System.Windows.Forms.TextBox
-    $box.Multiline = $true; $box.ReadOnly = $true; $box.ScrollBars = "Vertical"; $box.Dock = "Fill"
-    $box.Font = New-Object System.Drawing.Font("Consolas", 10); $box.BackColor = [System.Drawing.Color]::White
-    $box.Text = (Format-TaskReportText -Report $report)
-    $form.Controls.Add($box)
-
-    $btnExport = New-Object System.Windows.Forms.Button
-    $btnExport.Text = "Exporter (JSON + MD)"; $btnExport.Width = 180; $btnExport.Height = 30; $btnExport.Location = New-Object System.Drawing.Point(10, 8)
-    $btnExport.Add_Click({
-            try {
-                $folder = Join-Path $global:logFolder "reports"
-                $paths = Export-TaskReport -Task $Task -Folder $folder
-                [System.Windows.Forms.MessageBox]::Show("Exporté :`n$($paths.Json)`n$($paths.Markdown)", "AFOTRA") | Out-Null
-                Start-Process explorer.exe -ArgumentList $folder
-            } catch { [System.Windows.Forms.MessageBox]::Show("Erreur export : $_", "AFOTRA") | Out-Null }
-        }.GetNewClosure())
-    $panel.Controls.Add($btnExport)
-
-    $btnClose = New-Object System.Windows.Forms.Button
-    $btnClose.Text = "Fermer"; $btnClose.Width = 90; $btnClose.Height = 30; $btnClose.DialogResult = "OK"; $btnClose.Location = New-Object System.Drawing.Point(505, 8)
-    $panel.Controls.Add($btnClose); $form.AcceptButton = $btnClose
-
-    $form.ShowDialog() | Out-Null
-    $form.Dispose()
-}
-
-function Show-SessionReportDialog {
-    param([object]$Task, [object]$Session)
-    Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
-    $sr = Get-SessionReport -Task $Task -Session $Session
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Bilan de session"; $form.Width = 470; $form.Height = 390; $form.StartPosition = "CenterScreen"
-    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
-    $panel = New-Object System.Windows.Forms.Panel; $panel.Dock = "Bottom"; $panel.Height = 46; $form.Controls.Add($panel)
-    $box = New-Object System.Windows.Forms.TextBox
-    $box.Multiline = $true; $box.ReadOnly = $true; $box.ScrollBars = "Vertical"; $box.Dock = "Fill"
-    $box.Font = New-Object System.Drawing.Font("Consolas", 10); $box.BackColor = [System.Drawing.Color]::White
-    $box.Text = (Format-SessionReportText -Report $sr)
-    $form.Controls.Add($box)
-
-    $btnTask = New-Object System.Windows.Forms.Button
-    $btnTask.Text = "Voir le rapport de tâche"; $btnTask.Width = 200; $btnTask.Height = 30; $btnTask.Location = New-Object System.Drawing.Point(10, 8)
-    $btnTask.Add_Click({ Show-TaskReportDialog -Task $Task }.GetNewClosure())
-    $panel.Controls.Add($btnTask)
-
-    $btnClose = New-Object System.Windows.Forms.Button
-    $btnClose.Text = "Fermer"; $btnClose.Width = 90; $btnClose.Height = 30; $btnClose.DialogResult = "OK"; $btnClose.Location = New-Object System.Drawing.Point(355, 8)
-    $panel.Controls.Add($btnClose); $form.AcceptButton = $btnClose
-
-    $form.ShowDialog() | Out-Null
-    $form.Dispose()
-}
-
-function Show-EndedSessionReport {
-    # Reload the task and show the bilan of the session that was just appended.
-    param([string]$TaskId)
-    try {
-        $task = @(Get-Tasks -Path $global:taskStorePath | Where-Object { $_.Id -eq $TaskId })[0]
-        if (-not $task) { return }
-        $sessions = @($task.Sessions)
-        if ($sessions.Count -eq 0) { return }
-        Show-SessionReportDialog -Task $task -Session $sessions[$sessions.Count - 1]
-    } catch { if ($Debug) { Write-Warning "Show-EndedSessionReport: $_" } }
-}
-
-$btnTaskAdd.Add_Click({
-    $vals = Show-TaskDialog
-    if ($vals) {
-        $t = New-Task -Titre $vals.Titre -Description $vals.Description -Categorie $vals.Categorie `
-            -Projet $vals.Projet -Contact $vals.Contact -Priorite $vals.Priorite -Statut $vals.Statut `
-            -Bloquee_par $vals.Bloquee_par -Notes $vals.Notes -EstimeMinutes ([int]$vals.EstimeMinutes)
-        $t.DateEcheance = ConvertTo-IsoDate $vals.DateEcheance
-        $t.RappelSoir   = ConvertTo-IsoDate $vals.RappelSoir
-        if ($vals.Statut -eq "Termine") { $t.TermineLe = (Get-Date).ToString("s") }
-        Add-Task -Task $t -Path $global:taskStorePath | Out-Null
-        Update-Tasks-UI
-    }
-})
-
-$btnTaskEdit.Add_Click({
-    $existing = Get-SelectedTask
-    if (-not $existing) { [System.Windows.MessageBox]::Show("Sélectionnez une tâche.", "AFOTRA") | Out-Null; return }
-    $vals = Show-TaskDialog -Existing $existing
-    if ($vals) {
-        $existing.Titre = $vals.Titre; $existing.Description = $vals.Description; $existing.Categorie = $vals.Categorie
-        $existing.Projet = $vals.Projet; $existing.Contact = $vals.Contact; $existing.Priorite = $vals.Priorite
-        $existing.Bloquee_par = $vals.Bloquee_par; $existing.Notes = $vals.Notes
-        $existing | Add-Member -NotePropertyName EstimeMinutes -NotePropertyValue ([int]$vals.EstimeMinutes) -Force
-        $existing.DateEcheance = ConvertTo-IsoDate $vals.DateEcheance
-        $existing.RappelSoir   = ConvertTo-IsoDate $vals.RappelSoir
-        if ($vals.Statut -eq "Termine" -and $existing.Statut -ne "Termine") { $existing.TermineLe = (Get-Date).ToString("s") }
-        if ($vals.Statut -ne "Termine") { $existing.TermineLe = $null }
-        $existing.Statut = $vals.Statut
-        Update-Task -Task $existing -Path $global:taskStorePath | Out-Null
-        Update-Tasks-UI
-    }
-})
-
-$btnTaskComplete.Add_Click({
-    $sel = $tasksGrid.SelectedItem
-    if (-not $sel) { [System.Windows.MessageBox]::Show("Sélectionnez une tâche.", "AFOTRA") | Out-Null; return }
-    # If a session is running on this task, persist its time before completing.
-    if ($global:SessionState -and $global:SessionState.TaskId -eq $sel.Id) {
-        Stop-CurrentSession | Out-Null
-        Update-SessionUI; Update-SessionButtons
-    }
-    Complete-Task -Id $sel.Id -Path $global:taskStorePath | Out-Null
-    Update-Tasks-UI
-})
-
-$btnTaskArchive.Add_Click({
-    $sel = $tasksGrid.SelectedItem
-    if (-not $sel) { [System.Windows.MessageBox]::Show("Sélectionnez une tâche.", "AFOTRA") | Out-Null; return }
-    Archive-Task -Id $sel.Id -Path $global:taskStorePath | Out-Null
-    Update-Tasks-UI
-})
-
-$btnTaskReport.Add_Click({
-    $t = Get-SelectedTask
-    if (-not $t) { [System.Windows.MessageBox]::Show("Sélectionnez une tâche.", "AFOTRA") | Out-Null; return }
-    Show-TaskReportDialog -Task $t
-})
-
-$btnTaskRefresh.Add_Click({ Update-Tasks-UI })
-
-function Set-TaskFilterButtons {
-    param([string]$Active)
-    $map = @{
-        "Tous" = $btnFilterTous; "AFaire" = $btnFilterAFaire; "EnCours" = $btnFilterEnCours
-        "Aujourdhui" = $btnFilterAujourdhui; "Retard" = $btnFilterRetard
-    }
-    foreach ($k in $map.Keys) {
-        $map[$k].Background = if ($k -eq $Active) { "#2563EB" } else { "#64748B" }
-    }
-}
-
-$btnFilterTous.Add_Click({ $global:TaskFilter = "Tous"; Set-TaskFilterButtons "Tous"; Update-Tasks-UI })
-$btnFilterAFaire.Add_Click({ $global:TaskFilter = "AFaire"; Set-TaskFilterButtons "AFaire"; Update-Tasks-UI })
-$btnFilterEnCours.Add_Click({ $global:TaskFilter = "EnCours"; Set-TaskFilterButtons "EnCours"; Update-Tasks-UI })
-$btnFilterAujourdhui.Add_Click({ $global:TaskFilter = "Aujourdhui"; Set-TaskFilterButtons "Aujourdhui"; Update-Tasks-UI })
-$btnFilterRetard.Add_Click({ $global:TaskFilter = "Retard"; Set-TaskFilterButtons "Retard"; Update-Tasks-UI })
-
-$btnTaskSearch.Add_Click({ $global:TaskSearch = $taskSearchBox.Text.Trim(); Update-Tasks-UI })
-$btnTaskSearchClear.Add_Click({ $taskSearchBox.Text = ""; $global:TaskSearch = ""; Update-Tasks-UI })
-$taskSearchBox.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $global:TaskSearch = $taskSearchBox.Text.Trim(); Update-Tasks-UI } })
-
-# ---- Work sessions (Pomodoro) ---------------------------------------------
-function Format-Hms { param([int]$Sec) [TimeSpan]::FromSeconds([math]::Max(0, $Sec)).ToString('hh\:mm\:ss') }
-function Format-Mmss {
-    param([int]$Sec)
-    $s = [math]::Max(0, $Sec)
-    if ($s -ge 3600) { [TimeSpan]::FromSeconds($s).ToString('h\:mm\:ss') } else { [TimeSpan]::FromSeconds($s).ToString('mm\:ss') }
-}
-
-function Update-SessionButtons {
-    $active = ($null -ne $global:SessionState)
-    $mode = if ($active) { $global:SessionState.Mode } else { 'None' }
-    $btnSessStart.IsEnabled       = (-not $active)
-    $sessionEstimeInput.IsEnabled = (-not $active)
-    $btnSessPause.IsEnabled       = ($mode -eq 'Running')
-    $btnSessResume.IsEnabled      = ($mode -eq 'Paused' -or $mode -eq 'Break')
-    $btnSessBreak.IsEnabled       = ($mode -eq 'Running')
-    $btnSessComplete.IsEnabled    = $active
-    $btnSessStop.IsEnabled        = $active
-}
-
-function Update-SessionUI {
-    param($Readout = $null)
-    if (-not $global:SessionState) {
-        $sessionTaskText.Text = "Aucune session active"
-        $sessionCountdown.Text = "--:--"; $sessionCountdown.Foreground = "#9CA3AF"
-        $sessionPomText.Text = ""
-        $sessionWorkText.Text = "00:00:00"; $sessionGlobalText.Text = "00:00:00"; $sessionPauseText.Text = "00:00:00"
-        if ($global:OvSessionText) { $global:OvSessionText.Visibility = "Collapsed" }
-        return
-    }
-    if (-not $Readout) { $Readout = Step-Session -State $global:SessionState -Now (Get-Date) }
-    $sessionTaskText.Text = [string]$global:SessionState.TaskTitle
-
-    if ($global:SessionState.AwaitingResume) {
-        $sessionCountdown.Text = "Reprendre"; $sessionCountdown.Foreground = "#10B981"
-    } elseif ($Readout.Mode -eq 'Break') {
-        $sessionCountdown.Text = "Pause " + (Format-Mmss $Readout.BreakRemaining); $sessionCountdown.Foreground = "#8B5CF6"
-    } elseif ($global:SessionState.Mode -eq 'Paused') {
-        $sessionCountdown.Text = if ($Readout.HasTarget -and -not $Readout.IsOverrun) { Format-Mmss $Readout.RemainingSec } elseif ($Readout.IsOverrun) { "+" + (Format-Mmss $Readout.OverrunSec) } else { Format-Mmss $Readout.WorkSec }
-        $sessionCountdown.Foreground = "#F59E0B"
-    } elseif (-not $Readout.HasTarget) {
-        $sessionCountdown.Text = Format-Mmss $Readout.WorkSec; $sessionCountdown.Foreground = "#2563EB"
-    } elseif ($Readout.IsOverrun) {
-        $sessionCountdown.Text = "+" + (Format-Mmss $Readout.OverrunSec); $sessionCountdown.Foreground = "#EF4444"
-    } else {
-        $sessionCountdown.Text = Format-Mmss $Readout.RemainingSec; $sessionCountdown.Foreground = "#10B981"
-    }
-
-    $sessionWorkText.Text = Format-Hms $Readout.WorkSec
-    $sessionGlobalText.Text = Format-Hms $Readout.GlobalSec
-    $sessionPauseText.Text = Format-Hms $Readout.PauseSec
-    if ($global:SessionState.AwaitingResume) {
-        $sessionPomText.Text = "Pause terminée — clique Reprendre"
-    } elseif ($Readout.Mode -eq 'Break') {
-        $sessionPomText.Text = "Pause $($global:SessionState.BreakType) · $($Readout.PomCompleted) pomodoro(s)"
-    } else {
-        $sessionPomText.Text = "Pomodoro " + (Format-Mmss $Readout.PomRemainingSec) + " · $($Readout.PomCompleted) fait(s)"
-    }
-
-    if ($global:OvSessionText) {
-        $global:OvSessionText.Visibility = "Visible"
-        $global:OvSessionText.Text = "⏱ " + $sessionCountdown.Text + "  " + [string]$global:SessionState.TaskTitle
-    }
-}
-
-function Stop-CurrentSession {
-    # Persist accumulated time to the task, clear the live session. Returns the TaskId (or $null).
-    param([datetime]$Now = (Get-Date))
-    if (-not $global:SessionState) { return $null }
-    $taskId = $global:SessionState.TaskId
-    $res = Get-SessionResult -State $global:SessionState -Now $Now
-    $global:LastSessionResult = $res   # exposed so the end-of-session report can use it
-    try { Add-TaskSession -Id $taskId -Result $res -Path $global:taskStorePath | Out-Null } catch { if ($Debug) { Write-Warning "Add-TaskSession failed: $_" } }
-    $global:SessionState = $null
-    if ($global:SessionTimer) { $global:SessionTimer.Stop(); $global:SessionTimer = $null }
-    # Drop any pending focus-guard question when the session ends.
-    $global:GuardAsking = $null
-    $global:GuardCooldownUntil = $null
-    if ($global:OrbAskPopup) { $global:OrbAskPopup.IsOpen = $false }
-    if ($global:AlarmActive) { $global:AlarmActive = $false }
-    return $taskId
-}
-
-function Start-Chime {
-    # Short, non-looping cue on a background thread (Console.Beep would freeze the UI thread).
-    # 'Break' = a soft two-note fall; 'Resume' = a rising three-note "let's go".
-    param([ValidateSet('Break', 'Resume')][string]$Kind = 'Resume')
-    $global:ChimeNotes = if ($Kind -eq 'Break') { @(660, 150, 520, 220) } else { @(523, 130, 659, 130, 784, 240) }
-    $th = New-Object System.Threading.Thread([System.Threading.ThreadStart] {
-            try {
-                for ($i = 0; $i -lt $global:ChimeNotes.Count; $i += 2) {
-                    [System.Console]::Beep([int]$global:ChimeNotes[$i], [int]$global:ChimeNotes[$i + 1])
-                }
-            } catch { }
-        })
-    $th.IsBackground = $true
-    $th.Start()
-}
-
-function Start-SessionTimer {
-    if ($global:SessionTimer) { return }
-    $global:SessionTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $global:SessionTimer.Interval = [TimeSpan]::FromSeconds(1)
-    $global:SessionTimer.Add_Tick({
-        if (-not $global:SessionState) { return }
-        $now = Get-Date
-        $r = Step-Session -State $global:SessionState -Now $now
-        if ($r.BreakDue) {
-            # Work interval finished -> start the break.
-            Start-SessionBreak -State $global:SessionState -Now $now | Out-Null
-            $mins = if ($global:SessionState.BreakType -eq 'Long') { [int]$global:PomodoroConfig.longBreakMinutes } else { [int]$global:PomodoroConfig.shortBreakMinutes }
-            Show-AfotraNotification -Title "AFOTRA - Pomodoro" -Message "Cycle terminé — pause de $mins min ($($global:SessionState.BreakType))." | Out-Null
-            if ($global:PomodoroSound) { Start-Chime -Kind Break }
-            $r = Step-Session -State $global:SessionState -Now $now
-        }
-        elseif ($global:SessionState.Mode -eq 'Break' -and $global:SessionState.BreakEndsAt -and $now -ge $global:SessionState.BreakEndsAt) {
-            # Break time is up.
-            if ($global:PomodoroConfig.autoStartNext) {
-                Stop-SessionBreak -State $global:SessionState -Now $now | Out-Null
-                $global:SessionState.AwaitingResume = $false
-                Show-AfotraNotification -Title "AFOTRA - Pomodoro" -Message "Pause terminée — c'est reparti, focus !" | Out-Null
-                if ($global:PomodoroSound) { Start-Chime -Kind Resume }
-            } else {
-                # Wait for a manual Reprendre; a distinct "AwaitingResume" state makes the orb
-                # call you back (and we only notify once, not every tick).
-                $global:SessionState.Mode = 'Paused'; $global:SessionState.BreakType = $null; $global:SessionState.BreakEndsAt = $null
-                $global:SessionState.AwaitingResume = $true
-                Show-AfotraNotification -Title "AFOTRA - Pomodoro" -Message "Pause terminée — clique Reprendre pour repartir." | Out-Null
-                if ($global:PomodoroSound) { Start-Chime -Kind Resume }
-            }
-            $r = Step-Session -State $global:SessionState -Now $now
-        }
-        Update-SessionUI -Readout $r
-        Update-SessionButtons
-    })
-    $global:SessionTimer.Start()
-}
-
-$btnSessStart.Add_Click({
-    if ($global:SessionState) { [System.Windows.MessageBox]::Show("Une session est déjà active.", "AFOTRA") | Out-Null; return }
-    $sel = $tasksGrid.SelectedItem
-    if (-not $sel) { [System.Windows.MessageBox]::Show("Sélectionnez d'abord une tâche.", "AFOTRA") | Out-Null; return }
-    $estMin = 0; [int]::TryParse([string]$sessionEstimeInput.Text, [ref]$estMin) | Out-Null
-    if ($estMin -gt 0) { Set-TaskEstimate -Id $sel.Id -Minutes $estMin -Path $global:taskStorePath }
-    $global:SessionState = Start-Session -TaskId $sel.Id -EstimateSec ($estMin * 60) -Config $global:PomodoroConfig -Now (Get-Date)
-    $global:SessionState.TaskTitle = [string]$sel.Titre
-    $global:SessionState.AwaitingResume = $false
-    # Seed the focus-guard allow-list from the task's saved tools.
-    $fullTask = @($global:TasksCache | Where-Object { $_.Id -eq $sel.Id })[0]
-    $global:GuardAllow = @(Get-TaskTools -Task $fullTask)
-    $global:GuardSnooze = @()
-    $global:GuardAsking = $null
-    $global:GuardCooldownUntil = $null
-    Start-SessionTimer
-    Update-SessionUI
-    Update-SessionButtons
-    Update-Tasks-UI
-})
-
-$btnSessPause.Add_Click({
-    if ($global:SessionState -and $global:SessionState.Mode -eq 'Running') {
-        Suspend-Session -State $global:SessionState -Now (Get-Date) | Out-Null
-        Update-SessionUI; Update-SessionButtons
-    }
-})
-
-$btnSessResume.Add_Click({
-    if ($global:SessionState -and $global:SessionState.Mode -in @('Paused', 'Break')) {
-        $wasAwaiting = [bool]$global:SessionState.AwaitingResume
-        Resume-Session -State $global:SessionState -Now (Get-Date) | Out-Null
-        $global:SessionState.AwaitingResume = $false
-        if ($wasAwaiting) {
-            Show-AfotraNotification -Title "AFOTRA - Focus" -Message "Focus repris — au travail !" | Out-Null
-            if ($global:PomodoroSound) { Start-Chime -Kind Resume }
-        }
-        Update-SessionUI; Update-SessionButtons
-    }
-})
-
-$btnSessBreak.Add_Click({
-    if ($global:SessionState -and $global:SessionState.Mode -eq 'Running') {
-        Start-SessionBreak -State $global:SessionState -Now (Get-Date) | Out-Null
-        Update-SessionUI; Update-SessionButtons
-    }
-})
-
-$btnSessComplete.Add_Click({
-    $id = Stop-CurrentSession
-    if ($id) { Complete-Task -Id $id -Path $global:taskStorePath | Out-Null }
-    Update-SessionUI; Update-SessionButtons; Update-Tasks-UI
-    if ($id) { Show-EndedSessionReport -TaskId $id }
-})
-
-$btnSessStop.Add_Click({
-    $id = Stop-CurrentSession
-    Update-SessionUI; Update-SessionButtons; Update-Tasks-UI
-    if ($id) { Show-EndedSessionReport -TaskId $id }
-})
-
-# Evening reminder timer: fires due reminders (daily recurrence via NotifieLe guard).
-$global:TaskReminderTimer = New-Object System.Windows.Threading.DispatcherTimer
-$global:TaskReminderTimer.Interval = [TimeSpan]::FromSeconds(60)
-$global:TaskReminderTimer.Add_Tick({
-    try {
-        $tasks = @(Get-Tasks -Path $global:taskStorePath)
-        $due = @(Get-DueReminders -Tasks $tasks)
-        foreach ($t in $due) {
-            $body = $t.Titre
-            if ($t.Contact) { $body += "  -  $($t.Contact)" }
-            Show-AfotraNotification -Title "AFOTRA - Rappel du soir" -Message $body | Out-Null
-            Set-TaskNotified -Id $t.Id -Path $global:taskStorePath
-        }
-        if ($due.Count -gt 0) { Update-TaskSummaryCard }
-    } catch { if ($Debug) { Write-Warning "Reminder tick failed: $_" } }
-})
-$global:TaskReminderTimer.Start()
-
-# Dashboard refresh timer — DispatcherTimer, UI thread, no Invoke-OnUIThread needed
-$global:DashboardUpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
-$global:DashboardUpdateTimer.Interval = [TimeSpan]::FromMilliseconds(2000)
-$global:DashboardUpdateTimer.Add_Tick({ Update-Dashboard })
 $global:DashboardUpdateTimer.Start()
 
 # ===================================================================
@@ -1664,34 +1710,50 @@ $overlayXaml = @"
     ShowActivated="False"
     Left="40" Top="80">
   <Grid x:Name="OrbRoot" Background="Transparent">
-    <!-- The living sphere -->
-    <Ellipse x:Name="OrbEllipse" Width="90" Height="90" HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5" Cursor="Hand">
-      <Ellipse.Fill>
-        <RadialGradientBrush x:Name="OrbBrush" GradientOrigin="0.4,0.34" Center="0.5,0.5" RadiusX="0.62" RadiusY="0.62">
-          <GradientStop x:Name="OrbStopCore" Color="#5EEAD4" Offset="0.0"/>
-          <GradientStop x:Name="OrbStopMid"  Color="#14B8A6" Offset="0.65"/>
-          <GradientStop x:Name="OrbStopEdge" Color="#0014B8A6" Offset="1.0"/>
-        </RadialGradientBrush>
-      </Ellipse.Fill>
-      <Ellipse.Effect>
-        <DropShadowEffect x:Name="OrbGlow" Color="#14B8A6" BlurRadius="18" ShadowDepth="0" Opacity="0.85"/>
-      </Ellipse.Effect>
-      <Ellipse.RenderTransform>
+    <!-- The living bee -->
+    <Viewbox x:Name="OrbViewbox" Width="92" Height="92" HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5" Cursor="Hand">
+      <Viewbox.RenderTransform>
         <ScaleTransform x:Name="OrbScale" ScaleX="1" ScaleY="1"/>
-      </Ellipse.RenderTransform>
-    </Ellipse>
-    <!-- Wet highlight for an organic feel -->
-    <Ellipse x:Name="OrbHighlight" Width="26" Height="16" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-22,0,0" Opacity="0.55" IsHitTestVisible="False">
-      <Ellipse.Fill>
-        <RadialGradientBrush>
-          <GradientStop Color="#CCFFFFFF" Offset="0.0"/>
-          <GradientStop Color="#00FFFFFF" Offset="1.0"/>
-        </RadialGradientBrush>
-      </Ellipse.Fill>
-    </Ellipse>
+      </Viewbox.RenderTransform>
+      <Grid Width="100" Height="100">
+        <!-- wings -->
+        <Ellipse x:Name="OrbWingL" Width="42" Height="30" Fill="#59FFFFFF" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="4,8,0,0" RenderTransformOrigin="1,0.5">
+          <Ellipse.RenderTransform><RotateTransform x:Name="OrbWingLRot" Angle="-8"/></Ellipse.RenderTransform>
+        </Ellipse>
+        <Ellipse x:Name="OrbWingR" Width="42" Height="30" Fill="#59FFFFFF" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,8,4,0" RenderTransformOrigin="0,0.5">
+          <Ellipse.RenderTransform><RotateTransform x:Name="OrbWingRRot" Angle="8"/></Ellipse.RenderTransform>
+        </Ellipse>
+        <!-- body -->
+        <Ellipse x:Name="OrbBody" Width="66" Height="80" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,12,0,0">
+          <Ellipse.Fill>
+            <RadialGradientBrush x:Name="OrbBrush" GradientOrigin="0.4,0.3" Center="0.5,0.5" RadiusX="0.62" RadiusY="0.62">
+              <GradientStop x:Name="OrbStopCore" Color="#FFD54F" Offset="0.0"/>
+              <GradientStop x:Name="OrbStopMid"  Color="#FFB300" Offset="0.7"/>
+              <GradientStop x:Name="OrbStopEdge" Color="#00FFB300" Offset="1.0"/>
+            </RadialGradientBrush>
+          </Ellipse.Fill>
+          <Ellipse.Effect>
+            <DropShadowEffect x:Name="OrbGlow" Color="#FFB300" BlurRadius="18" ShadowDepth="0" Opacity="0.85"/>
+          </Ellipse.Effect>
+        </Ellipse>
+        <!-- stripes, clipped to the body -->
+        <Grid Width="66" Height="80" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,12,0,0" IsHitTestVisible="False">
+          <Grid.Clip><EllipseGeometry Center="33,40" RadiusX="33" RadiusY="40"/></Grid.Clip>
+          <StackPanel VerticalAlignment="Center">
+            <Rectangle Height="8" Fill="#1A1A1A" Margin="0,3,0,0"/>
+            <Rectangle Height="8" Fill="#1A1A1A" Margin="0,8,0,0"/>
+            <Rectangle Height="8" Fill="#1A1A1A" Margin="0,8,0,0"/>
+          </StackPanel>
+        </Grid>
+        <!-- head -->
+        <Ellipse Width="30" Height="24" Fill="#1A1A1A" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,2,0,0" IsHitTestVisible="False"/>
+        <Ellipse Width="5" Height="5" Fill="#FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="-9,8,0,0" IsHitTestVisible="False"/>
+        <Ellipse Width="5" Height="5" Fill="#FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="9,8,0,0" IsHitTestVisible="False"/>
+      </Grid>
+    </Viewbox>
 
     <!-- Hover reveal: full session/activity panel -->
-    <Popup x:Name="OrbDetailPopup" PlacementTarget="{Binding ElementName=OrbEllipse}" Placement="Right" AllowsTransparency="True" StaysOpen="True" HorizontalOffset="6">
+    <Popup x:Name="OrbDetailPopup" PlacementTarget="{Binding ElementName=OrbViewbox}" Placement="Right" AllowsTransparency="True" StaysOpen="True" HorizontalOffset="6">
       <Border Background="#F21F2937" CornerRadius="10" Padding="12" Margin="8">
         <Border.Effect><DropShadowEffect Color="Black" Opacity="0.55" BlurRadius="12" ShadowDepth="2"/></Border.Effect>
         <StackPanel Width="248">
@@ -1701,7 +1763,7 @@ $overlayXaml = @"
               <TextBlock Text="AFOTRA LIVE" FontSize="9" FontWeight="Bold" Foreground="#9CA3AF"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-              <Button x:Name="BtnOverlayStartStop" Content="Start" Background="#10B981" Foreground="White" FontWeight="Bold" FontSize="10" Padding="8,3" BorderThickness="0" Cursor="Hand" Margin="0,0,5,0"/>
+              <Button x:Name="BtnOverlayStartStop" Content="Live OFF" Background="#10B981" Foreground="White" FontWeight="Bold" FontSize="10" Padding="8,3" BorderThickness="0" Cursor="Hand" Margin="0,0,5,0"/>
               <Button x:Name="BtnCloseOverlay" Content="Masquer" Background="Transparent" Foreground="#9CA3AF" BorderThickness="0" FontSize="10" Cursor="Hand" Padding="4,0"/>
             </StackPanel>
           </Grid>
@@ -1721,9 +1783,9 @@ $overlayXaml = @"
           </Grid>
           <Grid Margin="0,8,0,0">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="Focus:" FontSize="10" Foreground="#6B7280" VerticalAlignment="Center"/>
+              <TextBlock Text="Focus:" FontSize="10" Foreground="#9A9A9A" VerticalAlignment="Center"/>
               <TextBlock x:Name="OvFocusScore" Text="0%" FontSize="10" FontWeight="Bold" Foreground="#10B981" Margin="4,0,10,0" VerticalAlignment="Center"/>
-              <TextBlock Text="Tracké:" FontSize="10" Foreground="#6B7280" VerticalAlignment="Center"/>
+              <TextBlock Text="Tracké:" FontSize="10" Foreground="#9A9A9A" VerticalAlignment="Center"/>
               <TextBlock x:Name="OvTotalTime" Text="0m" FontSize="10" Foreground="#D1D5DB" Margin="4,0,0,0" VerticalAlignment="Center"/>
             </StackPanel>
             <TextBlock x:Name="OvAlertText" Text="" FontSize="10" FontWeight="Bold" Foreground="#FCA5A5" HorizontalAlignment="Right" VerticalAlignment="Center"/>
@@ -1733,8 +1795,16 @@ $overlayXaml = @"
       </Border>
     </Popup>
 
+    <!-- Session milestone bubble -->
+    <Popup x:Name="OrbMilestonePopup" PlacementTarget="{Binding ElementName=OrbViewbox}" Placement="Top" AllowsTransparency="True" StaysOpen="True" HorizontalOffset="8" VerticalOffset="-6">
+      <Border Background="#F21A1A1A" CornerRadius="10" Padding="12,9" Margin="8" BorderBrush="#FFC107" BorderThickness="1">
+        <Border.Effect><DropShadowEffect Color="Black" Opacity="0.45" BlurRadius="14" ShadowDepth="2"/></Border.Effect>
+        <TextBlock x:Name="OrbMilestoneText" Text="" Foreground="#FFF7CC" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" MaxWidth="260"/>
+      </Border>
+    </Popup>
+
     <!-- Focus-guard question -->
-    <Popup x:Name="OrbAskPopup" PlacementTarget="{Binding ElementName=OrbEllipse}" Placement="Bottom" AllowsTransparency="True" StaysOpen="True">
+    <Popup x:Name="OrbAskPopup" PlacementTarget="{Binding ElementName=OrbViewbox}" Placement="Bottom" AllowsTransparency="True" StaysOpen="True">
       <Border Background="#F2111827" CornerRadius="10" Padding="14" Margin="8" BorderBrush="#EF4444" BorderThickness="2">
         <Border.Effect><DropShadowEffect Color="Black" Opacity="0.6" BlurRadius="14" ShadowDepth="2"/></Border.Effect>
         <StackPanel Width="300">
@@ -1772,18 +1842,32 @@ if ($global:OverlayWindow) {
     $btnOverlayStartStop = $global:OverlayWindow.FindName("BtnOverlayStartStop")
     $btnCloseOverlay     = $global:OverlayWindow.FindName("BtnCloseOverlay")
     # Orb elements
-    $orbEllipse   = $global:OverlayWindow.FindName("OrbEllipse")
+    $orbViewbox   = $global:OverlayWindow.FindName("OrbViewbox")
     $orbScale     = $global:OverlayWindow.FindName("OrbScale")
     $orbGlow      = $global:OverlayWindow.FindName("OrbGlow")
     $orbStopCore  = $global:OverlayWindow.FindName("OrbStopCore")
     $orbStopMid   = $global:OverlayWindow.FindName("OrbStopMid")
     $orbStopEdge  = $global:OverlayWindow.FindName("OrbStopEdge")
+    $orbWingLRot  = $global:OverlayWindow.FindName("OrbWingLRot")
+    $orbWingRRot  = $global:OverlayWindow.FindName("OrbWingRRot")
     $global:OrbDetailPopup = $global:OverlayWindow.FindName("OrbDetailPopup")
+    $global:OrbMilestonePopup = $global:OverlayWindow.FindName("OrbMilestonePopup")
+    $global:OrbMilestoneText  = $global:OverlayWindow.FindName("OrbMilestoneText")
     $global:OrbAskPopup    = $global:OverlayWindow.FindName("OrbAskPopup")
     $orbAskText   = $global:OverlayWindow.FindName("OrbAskText")
     $btnAskYes    = $global:OverlayWindow.FindName("BtnAskYes")
     $btnAskNo     = $global:OverlayWindow.FindName("BtnAskNo")
     $btnAskIgnore = $global:OverlayWindow.FindName("BtnAskIgnore")
+    Update-TrackingButtons
+
+    $global:OrbMilestoneTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $global:OrbMilestoneTimer.Interval = [TimeSpan]::FromSeconds(7)
+    $global:OrbMilestoneTimer.Add_Tick({
+        try {
+            $global:OrbMilestoneTimer.Stop()
+            if ($global:OrbMilestonePopup) { $global:OrbMilestonePopup.IsOpen = $false }
+        } catch { }
+    })
 
     # Drag sur la fenêtre entière, mais annulé si le clic vient d'un bouton
     $global:OverlayWindow.Add_MouseLeftButtonDown({
@@ -1946,15 +2030,7 @@ if ($global:OverlayWindow) {
         }
 
         # Indicateur running + bouton overlay
-        $isRunning = $global:TrackerRunning
-        $ovStatusDot.Fill = if ($isRunning) { "#10B981" } else { "#6B7280" }
-        if ($isRunning) {
-            $btnOverlayStartStop.Content    = "Stop"
-            $btnOverlayStartStop.Background = "#EF4444"
-        } else {
-            $btnOverlayStartStop.Content    = "Start"
-            $btnOverlayStartStop.Background = "#10B981"
-        }
+        Update-TrackingButtons
 
         # Durée sur la fenêtre courante
         $ovDuration.Text = if ($global:CurrentActivityStart) {
@@ -1962,43 +2038,60 @@ if ($global:OverlayWindow) {
         } else { "00:00:00" }
 
         # Score focus du jour (lecture CSV légère)
-        $lf = Get-TodayLogFile -LogFolder $global:logFolder
-        if (Test-Path $lf) {
-            try {
-                $rows = @(Import-Csv $lf -Encoding UTF8 -ErrorAction SilentlyContinue)
-                if ($rows.Count -gt 0) {
-                    $ss    = [int]$rows[0].SampleSeconds
-                    $total = $rows.Count * $ss
-                    $focus = ($rows | Where-Object Category -eq "travail" | Measure-Object).Count * $ss
-                    $ovFocusScore.Text = "$(if($total -gt 0){[math]::Round($focus/$total*100,1)}else{0})%"
-                    $ovTotalTime.Text  = "$([math]::Round($total/60,0))m"
-                }
-            } catch {}
-        }
+        try {
+            $rd = Get-DashboardReportData
+            if ($rd) {
+                $ovFocusScore.Text = "$($rd.FocusScore)%"
+                $ovTotalTime.Text  = "$([math]::Round($rd.TotalSeconds / 60, 0))m"
+            } else {
+                $ovFocusScore.Text = "0%"
+                $ovTotalTime.Text  = "0m"
+            }
+        } catch {}
 
         $sessionRunning = ($global:SessionState -and $global:SessionState.Mode -eq 'Running')
 
-        # --- Focus guard : pendant une session, interpelle sur tout process hors liste blanche ---
-        if ($global:AsstFocusGuard -and $sessionRunning -and $display) {
-            $proc = [string]$display.ProcessName
-            $isAfotraWin = ($proc -eq 'powershell' -and $display.WindowTitle -like '*AFOTRA*')
+        # --- Focus guard : escalade tant qu'on reste hors-tâche ; "Non" ne calme pas ---
+        # IMPORTANT: use $info (the REAL foreground), not $display (which is substituted with the
+        # last tracked activity while AFOTRA is in front — that would trigger the guard spuriously
+        # the moment you start a session and balloon the orb over the whole screen).
+        if ($global:AsstFocusGuard -and $sessionRunning -and $info) {
+            $proc = [string]$info.ProcessName
+            $isAfotraWin = ($proc -eq 'powershell' -and $info.WindowTitle -like '*AFOTRA*')
             $allow = @($global:GuardAllow) + @($global:GuardSnooze)
             $onTask = $isAfotraWin -or (Test-ProcessAllowed -ProcessName $proc -AllowList $allow)
-            $inCooldown = ($global:GuardCooldownUntil -and (Get-Date) -lt $global:GuardCooldownUntil)
 
             if ($onTask) {
-                if ($global:GuardAsking) { Clear-Guard }   # revenu sur le droit chemin
+                # Back on the right track -> everything calms and the escalation resets.
+                if ($global:GuardAsking -or $global:GuardOffTaskSince) { Clear-Guard }
             }
-            elseif (-not $global:GuardAsking -and -not $inCooldown) {
-                $global:GuardAsking = $proc
-                $global:GuardAskStart = Get-Date
-                $orbAskText.Text = "« $proc » — en rapport avec « $($global:SessionState.TaskTitle) » ?"
-                if ($global:OrbDetailPopup) { $global:OrbDetailPopup.IsOpen = $false }
-                if ($global:OrbAskPopup) { $global:OrbAskPopup.IsOpen = $true }
-                if ($global:AsstGuardSound) { Start-Alarm }
+            else {
+                # Off-task: start/continue the streak. Intensity (in Update-Orb) grows with
+                # the streak duration + the number of "Non", so it gets more harassing.
+                if (-not $global:GuardOffTaskSince) { $global:GuardOffTaskSince = Get-Date }
+                if (-not $global:GuardAskStart)     { $global:GuardAskStart = Get-Date }
+                if ($global:GuardAsking -ne $proc)  { $global:GuardAsking = $proc }   # switched to another off-task app
+
+                $task = [string]$global:SessionState.TaskTitle
+                $askMsg = if ([int]$global:GuardNonCount -gt 0) { "Toujours hors-tâche — reviens sur « $task » !" }
+                          else { "« $proc » — en rapport avec « $task » ?" }
+
+                $popupOpen = ($global:OrbAskPopup -and $global:OrbAskPopup.IsOpen)
+                if (-not $popupOpen -and (-not $global:GuardReaskAt -or (Get-Date) -ge $global:GuardReaskAt)) {
+                    # (re)open the question — after "Non" this fires again once the short re-arm elapses.
+                    if ($orbAskText) { $orbAskText.Text = $askMsg }
+                    if ($global:OrbDetailPopup) { $global:OrbDetailPopup.IsOpen = $false }
+                    if ($global:OrbAskPopup) { $global:OrbAskPopup.IsOpen = $true }
+                    $global:GuardReaskAt = $null
+                }
+                elseif ($popupOpen -and $orbAskText) { $orbAskText.Text = $askMsg }
+
+                # Sound escalation: on if configured, or once the user has refused twice and stayed.
+                $wantSound = $global:AsstGuardSound -or ([int]$global:GuardNonCount -ge 2)
+                if ($wantSound -and -not $global:AlarmActive) { Start-Alarm }
             }
         }
-        elseif ($global:GuardAsking) {
+        elseif ($global:GuardAsking -or $global:GuardOffTaskSince) {
             Clear-Guard   # session finie/pause -> on arrête d'interpeller
         }
 
@@ -2024,7 +2117,7 @@ if ($global:OverlayWindow) {
     # Overlay refresh 800ms
     $global:OverlayDispTimer = New-Object System.Windows.Threading.DispatcherTimer
     $global:OverlayDispTimer.Interval = [TimeSpan]::FromMilliseconds(800)
-    $global:OverlayDispTimer.Add_Tick({ Update-Overlay })
+    $global:OverlayDispTimer.Add_Tick({ try { Update-Overlay } catch { if ($Debug) { Write-Warning "Overlay tick: $_" } } })
     $global:OverlayDispTimer.Start()
 
     # ---- Assistant orb: colour helpers, guard clearing, animation, ask handlers ----
@@ -2037,6 +2130,10 @@ if ($global:OverlayWindow) {
 
     function Clear-Guard {
         $global:GuardAsking = $null
+        $global:GuardOffTaskSince = $null
+        $global:GuardNonCount = 0
+        $global:GuardReaskAt = $null
+        $global:GuardAskStart = $null
         if ($global:OrbAskPopup) { $global:OrbAskPopup.IsOpen = $false }
         Stop-Alarm
         if ($global:ShakeActive) { Stop-ShakeMode }
@@ -2047,15 +2144,17 @@ if ($global:OverlayWindow) {
             $hasSession = [bool]$global:SessionState
             $mode = if ($hasSession) { [string]$global:SessionState.Mode } else { 'None' }
             $isOverrun = $false
-            if ($hasSession) { $isOverrun = [bool](Step-Session -State $global:SessionState -Now (Get-Date)).IsOverrun }
+            if ($hasSession -and $global:SessionReadout) { $isOverrun = [bool]$global:SessionReadout.IsOverrun }
             $guard = [bool]$global:GuardAsking
             $awaiting = [bool]($hasSession -and $global:SessionState.AwaitingResume)
             $mood = Get-OrbMood -HasSession $hasSession -Mode $mode -IsOverrun $isOverrun -Guard $guard -AwaitingResume $awaiting
             if ($mood -eq 'Idle' -and $global:ShakeActive) { $mood = 'Overrun' }
 
             $intensity = 0.0
-            if ($mood -eq 'Ask' -and $global:GuardAskStart) {
-                $intensity = [math]::Min(1.0, ((Get-Date) - $global:GuardAskStart).TotalSeconds / 8.0)
+            if ($mood -eq 'Ask' -and $global:GuardOffTaskSince) {
+                # Grows with time spent off-task (~25 s to max) AND with each "Non" (+0.3 each).
+                $secs = ((Get-Date) - $global:GuardOffTaskSince).TotalSeconds
+                $intensity = [math]::Min(1.0, ($secs / 25.0) + ([int]$global:GuardNonCount * 0.3))
             }
             $vis = Get-OrbVisual -Mood $mood -Intensity $intensity
 
@@ -2068,7 +2167,7 @@ if ($global:OverlayWindow) {
             if ($global:OrbHover) { $target = [math]::Max($target, 100) }
             $global:OrbCurSize = $global:OrbCurSize + ($target - $global:OrbCurSize) * 0.18
             $sz = [double]$global:OrbCurSize
-            $orbEllipse.Width = $sz; $orbEllipse.Height = $sz
+            $orbViewbox.Width = $sz; $orbViewbox.Height = $sz
 
             $global:OrbPhase += (50.0 / [double]$vis.PulsePeriodMs)
             $tau = 2 * [math]::PI
@@ -2076,6 +2175,12 @@ if ($global:OverlayWindow) {
             $wob   = [double]$vis.WobbleAmp * [math]::Sin($tau * $global:OrbPhase * 1.6)
             $orbScale.ScaleX = $pulse + $wob
             $orbScale.ScaleY = $pulse - $wob
+            # Wing flap — faster when agitated (shorter pulse period)
+            if ($orbWingLRot -and $orbWingRRot) {
+                $flap = [math]::Abs([math]::Sin($tau * $global:OrbPhase * 3.0)) * 18.0
+                $orbWingLRot.Angle = -8.0 - $flap
+                $orbWingRRot.Angle = 8.0 + $flap
+            }
             $orbGlow.BlurRadius = [double]$vis.GlowRadius * (1.0 + 0.35 * [math]::Sin($tau * $global:OrbPhase))
             $orbGlow.Opacity = 0.7 + 0.25 * (0.5 + 0.5 * [math]::Sin($tau * $global:OrbPhase))
 
@@ -2115,9 +2220,13 @@ if ($global:OverlayWindow) {
         if ($global:GuardAsking -and $global:SessionState) {
             Add-TaskDigression -Id $global:SessionState.TaskId -Path $global:taskStorePath | Out-Null
         }
-        $global:GuardCooldownUntil = (Get-Date).AddSeconds(12)   # laisse le temps de fermer l'app
-        if ($ovAlertText) { $ovAlertText.Text = "Recentre-toi sur ta tâche" }
-        Clear-Guard
+        # "Non" does NOT calm the orb: bump the escalation and re-arm the question. It keeps
+        # harassing (bigger, redder, faster, then sound) until you actually go back on task.
+        $global:GuardNonCount = [int]$global:GuardNonCount + 1
+        if ($ovAlertText) { $ovAlertText.Text = "Reviens sur ta tâche" }
+        if ($global:OrbAskPopup) { $global:OrbAskPopup.IsOpen = $false }
+        $global:GuardReaskAt = (Get-Date).AddSeconds(5)   # brief window to actually close the app
+        # Guard stays armed ($global:GuardAsking / GuardOffTaskSince unchanged) -> orb stays agitated.
     })
     $btnAskIgnore.Add_Click({
         if ($global:GuardAsking) { $global:GuardSnooze += $global:GuardAsking }   # snooze pour la session
@@ -2137,42 +2246,58 @@ if ($global:OverlayWindow) {
 }
 
 # ===================================================================
-# Window cleanup + arrêt du DispatcherFrame
+# Window cleanup
 # ===================================================================
-$global:AppFrame = New-Object System.Windows.Threading.DispatcherFrame
 
 $window.Add_Closing({
+    param($sender, $eventArgs)
     try {
+        Write-DashboardRuntimeError "Main window closing. sessionActive=$([bool]$global:SessionState) overlayVisible=$([bool]($global:OverlayWindow -and $global:OverlayWindow.IsVisible))"
         Stop-TrackingTimer
         Stop-DashboardTimer
         if ($global:TaskReminderTimer)  { $global:TaskReminderTimer.Stop();  $global:TaskReminderTimer  = $null }
-        if ($global:SessionState)       { Stop-CurrentSession | Out-Null }   # persist in-progress session time
+        if ($global:SessionState) {
+            try { Stop-CurrentSession | Out-Null }
+            catch { Write-DashboardRuntimeError "Persist session during closing failed: $_" }
+        }
         if ($global:SessionTimer)       { $global:SessionTimer.Stop();       $global:SessionTimer       = $null }
         Close-AfotraNotifier
         if ($global:OverlayDispTimer)   { $global:OverlayDispTimer.Stop();   $global:OverlayDispTimer   = $null }
         if ($global:OrbAnimTimer)       { $global:OrbAnimTimer.Stop();       $global:OrbAnimTimer       = $null }
+        if ($global:OrbMilestoneTimer)  { $global:OrbMilestoneTimer.Stop();  $global:OrbMilestoneTimer  = $null }
         if ($global:OrbHideTimer)       { $global:OrbHideTimer.Stop();       $global:OrbHideTimer       = $null }
         if ($global:ShakeWobbleTimer)   { $global:ShakeWobbleTimer.Stop();   $global:ShakeWobbleTimer   = $null }
         if ($global:ShakeTriggerTimer)  { $global:ShakeTriggerTimer.Stop();  $global:ShakeTriggerTimer  = $null }
         $global:AlarmActive = $false
         if ($global:OverlayWindow)      { $global:OverlayWindow.Close();     $global:OverlayWindow      = $null }
-    } catch { }
-    # Arrêter la boucle dispatcher pour que le script se termine
-    $global:AppFrame.Continue = $false
+    } catch {
+        Write-DashboardRuntimeError "Main window closing handler failed: $_"
+    }
 })
 
 Initialize-UI
-
-# Show() au lieu de ShowDialog() — évite le blocage modal des autres fenêtres
-$window.Show()
 
 if ($global:OverlayWindow) {
     $global:OverlayWindow.Show()
     $btnToggleOverlay.Content = "Masquer Overlay"
 }
 
-# Garde le script vivant sans créer de fenêtre modale bloquante
-[System.Windows.Threading.Dispatcher]::PushFrame($global:AppFrame)
+# Run the WPF dispatcher with the main window as the lifetime owner.
+$app = [System.Windows.Application]::Current
+if (-not $app) {
+    $app = New-Object System.Windows.Application
+}
+$app.MainWindow = $window
+$app.Add_DispatcherUnhandledException({
+    param($sender, $eventArgs)
+    try { Write-DashboardRuntimeError "Dispatcher unhandled exception: $($eventArgs.Exception)" } catch { }
+    $eventArgs.Handled = $true
+})
+$app.ShutdownMode = [System.Windows.ShutdownMode]::OnMainWindowClose
+Write-DashboardRuntimeError "Application.Run starting. mainWindowTitle=$($app.MainWindow.Title)"
+$app.Run($window) | Out-Null
+Write-DashboardRuntimeError "Application.Run returned."
 
 Stop-TrackingTimer
 Stop-DashboardTimer
+Write-DashboardRuntimeError "Dashboard script exited after Run."

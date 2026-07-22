@@ -1,12 +1,11 @@
-# daily-report.ps1 - Generate daily reports
+﻿# daily-report.ps1 - Generate daily reports
 # Author: CodeScooper
 # Project: AFOTRA - Awema Focus Tracker
 
 $ErrorActionPreference = "Stop"
 
-try {
-    $scriptRoot = $PSScriptRoot
-    $configPath = Join-Path $scriptRoot "config.json"
+$scriptRoot = $PSScriptRoot
+$configPath = Join-Path $scriptRoot "config.json"
 
     # Import modules
     Import-Module (Join-Path $scriptRoot "modules\Tracker.Core.psm1") -Force
@@ -14,6 +13,7 @@ try {
     Import-Module (Join-Path $scriptRoot "modules\Tasks.Core.psm1") -Force -DisableNameChecking
     Import-Module (Join-Path $scriptRoot "modules\SessionReport.Core.psm1") -Force -DisableNameChecking
 
+try {
     $config = Get-Content $configPath -Encoding UTF8 | ConvertFrom-Json
     $logFolder = Join-Path $scriptRoot $config.logFolder
     $reportFolder = Join-Path $logFolder "reports"
@@ -45,7 +45,11 @@ try {
         $allTasks = @(Get-Tasks)
         $taskSummary = Get-TaskSummary -Tasks $allTasks
         # Per-task session bilan, only for tasks that actually had sessions.
-        $taskDetail = @($allTasks | Where-Object { @($_.Sessions).Count -gt 0 } | ForEach-Object { Get-TaskReport -Task $_ })
+        $taskDetail = @($allTasks | Where-Object {
+            $_.Sessions -and @($_.Sessions | Where-Object {
+                $_ -and ($_.Debut -or $_.Fin -or ([int]$_.TravailSecondes -gt 0) -or ([int]$_.GlobalSecondes -gt 0))
+            }).Count -gt 0
+        } | ForEach-Object { Get-TaskReport -Task $_ })
     } catch { }
 
     Export-ReportToJSON -ReportData $reportData -OutputFile $jsonFile -TaskSummary $taskSummary -TaskDetail $taskDetail
